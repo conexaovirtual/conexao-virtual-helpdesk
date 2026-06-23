@@ -111,14 +111,13 @@ serve(async (req: Request) => {
         content: m.content || "",
       }));
 
-    // Replace the last user message with the effective (transcribed) version if audio
-    if (isAudioMessage && chatHistory.length > 0) {
-      const lastIdx = chatHistory.length - 1;
-      if (chatHistory[lastIdx].role === "user") {
-        chatHistory[lastIdx].content = effectiveMessage;
-      } else {
-        chatHistory.push({ role: "user", content: effectiveMessage });
-      }
+    // A linha do áudio entra na history como nome de arquivo e é filtrada acima,
+    // então a transcrição NUNCA está no chatHistory. Garantimos que ela seja a
+    // última fala do usuário (append), independente do estado do histórico —
+    // antes, quando o histórico filtrado ficava vazio, a transcrição era descartada
+    // e a IA respondia só uma saudação genérica.
+    if (isAudioMessage) {
+      chatHistory.push({ role: "user", content: effectiveMessage });
     }
 
     // Inject the image as a multimodal message so the model can actually see it.
