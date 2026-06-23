@@ -2013,7 +2013,7 @@ async function trackFirstResponse(supabase: any, conversationId: string) {
     .eq("id", conversationId);
 }
 
-// ─── Audio Transcription via Gemini ──────────────────────────────────
+// ─── Audio Transcription via OpenAI Whisper ──────────────────────────
 
 async function fetchImageAsDataUrl(mediaUrl: string): Promise<string | null> {
   try {
@@ -2043,46 +2043,32 @@ async function transcribeAudio(mediaUrl: string, apiKey: string): Promise<string
     if (!audioResponse.ok) throw new Error(`Failed to download audio: ${audioResponse.status}`);
 
     const audioBuffer = await audioResponse.arrayBuffer();
-    const base64Audio = btoa(
-      Array.from(new Uint8Array(audioBuffer))
-        .map((b) => String.fromCharCode(b))
-        .join("")
-    );
-
-    // Detect format from URL or content-type
     const contentType = audioResponse.headers.get("content-type") || "audio/ogg";
-    const format = contentType.includes("ogg") ? "ogg" : contentType.includes("mp3") ? "mp3" : contentType.includes("mp4") || contentType.includes("m4a") ? "m4a" : "ogg";
 
-    console.log(`Audio downloaded: ${audioBuffer.byteLength} bytes, format: ${format}`);
+    // WhatsApp envia OGG/Opus. O Whisper aceita ogg/m4a/mp3/wav nativamente;
+    // a extensão no nome do arquivo é o que sinaliza o formato pra API.
+    const ext = contentType.includes("mp3") || contentType.includes("mpeg") ? "mp3"
+      : contentType.includes("mp4") || contentType.includes("m4a") ? "m4a"
+      : contentType.includes("wav") ? "wav"
+      : "ogg";
 
-    // Use Gemini to transcribe (it supports audio natively)
-    const transcribeResponse = await fetch(AI_GATEWAY_URL, {
+    console.log(`Audio downloaded: ${audioBuffer.byteLength} bytes, ext: ${ext}`);
+
+    // Endpoint dedicado de transcrição da OpenAI (Whisper). NÃO usar o /chat:
+    // gpt-4o-mini não aceita áudio, e o input_audio do chat só aceita wav/mp3.
+    const form = new FormData();
+    form.append("file", new Blob([audioBuffer], { type: contentType }), `audio.${ext}`);
+    form.append("model", "whisper-1");
+    form.append("language", "pt");
+    form.append("response_format", "json");
+
+    const transcribeResponse = await fetch("https://api.openai.com/v1/audio/transcriptions", {
       method: "POST",
       headers: {
         Authorization: `Bearer ${apiKey}`,
-        "Content-Type": "application/json",
+        // NÃO definir Content-Type: o fetch monta o boundary do multipart sozinho.
       },
-      body: JSON.stringify({
-        model: AI_MODEL,
-        messages: [
-          {
-            role: "user",
-            content: [
-              {
-                type: "text",
-                text: "Transcreva este áudio em português brasileiro. Retorne APENAS o texto transcrito, sem comentários adicionais. Se não conseguir entender, diga 'Não foi possível entender o áudio'.",
-              },
-              {
-                type: "input_audio",
-                input_audio: {
-                  data: base64Audio,
-                  format: format,
-                },
-              },
-            ],
-          },
-        ],
-      }),
+      body: form,
     });
 
     if (!transcribeResponse.ok) {
@@ -2092,7 +2078,7 @@ async function transcribeAudio(mediaUrl: string, apiKey: string): Promise<string
     }
 
     const transcribeResult = await transcribeResponse.json();
-    const transcription = transcribeResult.choices?.[0]?.message?.content?.trim();
+    const transcription = (transcribeResult.text || "").trim();
 
     if (!transcription) throw new Error("Empty transcription");
 
