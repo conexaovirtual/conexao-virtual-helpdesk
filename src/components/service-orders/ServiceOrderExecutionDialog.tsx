@@ -4,18 +4,17 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } f
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
-import { Checkbox } from "@/components/ui/checkbox";
 import { useToast } from "@/hooks/use-toast";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
-import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage, FormDescription } from "@/components/ui/form";
+import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from "@/components/ui/form";
 import { ImageUpload } from "@/components/ui/ImageUpload";
 import { UploadedImage } from "@/lib/imageUtils";
 import { VoiceInputButton } from "@/components/ui/VoiceInputButton";
 import { AIExecutionReport } from "@/components/ai/AIExecutionReport";
-import { GeolocationCapture } from "@/components/ui/GeolocationCapture";
 import { useGeolocation, GeoPosition } from "@/hooks/useGeolocation";
+import { ChevronDown, CheckCircle2, Save, Loader2 } from "lucide-react";
 
 interface ServiceOrderExecutionDialogProps {
   open: boolean;
@@ -24,13 +23,13 @@ interface ServiceOrderExecutionDialogProps {
   onSuccess?: () => void;
 }
 
+const hoje = () => new Date().toISOString().split("T")[0];
+
 const executionSchema = z.object({
+  descricao_servicos: z.string().min(5, "Descreva o que foi feito (mín. 5 caracteres)"),
   data_execucao: z.string().min(1, "Data é obrigatória"),
-  descricao_servicos: z.string().min(20, "Descrição deve ter no mínimo 20 caracteres"),
-  tempo_gasto_horas: z.number().min(0.25, "Tempo mínimo é 0.25h (15 min)").max(24, "Tempo máximo é 24h"),
-  custo_pecas: z.number().min(0, "Custo não pode ser negativo").optional(),
-  observacoes_execucao: z.string().optional(),
-  finalizar: z.boolean().default(false),
+  tempo_gasto_horas: z.number().min(0).max(24).optional(),
+  custo_pecas: z.number().min(0).optional(),
 });
 
 type ExecutionFormData = z.infer<typeof executionSchema>;
@@ -44,18 +43,17 @@ export function ServiceOrderExecutionDialog({
   const [loading, setLoading] = useState(false);
   const [uploadedImages, setUploadedImages] = useState<UploadedImage[]>([]);
   const [gpsLocal, setGpsLocal] = useState<GeoPosition | null>(null);
+  const [showDetails, setShowDetails] = useState(false);
   const geoLocal = useGeolocation();
   const { toast } = useToast();
 
   const form = useForm<ExecutionFormData>({
     resolver: zodResolver(executionSchema),
     defaultValues: {
-      data_execucao: new Date().toISOString().split('T')[0],
       descricao_servicos: serviceOrder?.descricao_servicos || "",
-      tempo_gasto_horas: 1,
+      data_execucao: hoje(),
+      tempo_gasto_horas: undefined,
       custo_pecas: 0,
-      observacoes_execucao: "",
-      finalizar: false,
     },
   });
 
@@ -66,7 +64,7 @@ export function ServiceOrderExecutionDialog({
     }
   }, [serviceOrder]);
 
-  // Auto-capturar localização ao abrir o dialog
+  // Captura a localização em segundo plano ao abrir (sem ocupar a tela)
   useEffect(() => {
     if (open && !gpsLocal) {
       geoLocal.captureLocation().then((pos) => {
@@ -75,21 +73,19 @@ export function ServiceOrderExecutionDialog({
     }
   }, [open]);
 
-  const onSubmit = async (data: ExecutionFormData) => {
+  const onSubmit = async (data: ExecutionFormData, finalizar: boolean) => {
     setLoading(true);
     try {
       const { data: { user } } = await supabase.auth.getUser();
       if (!user) throw new Error("Usuário não autenticado");
 
-      // Valor padrão da hora do técnico (pode ser configurável futuramente)
-      const hourlyRate = 80;
-      const custoTotal = (data.tempo_gasto_horas * hourlyRate) + (data.custo_pecas || 0);
-      const novoStatus = data.finalizar ? "finalizada" : "executada";
+      const custoTotal = data.custo_pecas || 0;
+      const novoStatus = finalizar ? "finalizada" : "executada";
 
       const updateData: any = {
         data_execucao: data.data_execucao,
         descricao_servicos: data.descricao_servicos,
-        tempo_gasto_horas: data.tempo_gasto_horas,
+        tempo_gasto_horas: data.tempo_gasto_horas ?? null,
         custo_pecas: data.custo_pecas || 0,
         custo_total: custoTotal,
         status: novoStatus,
@@ -97,17 +93,7 @@ export function ServiceOrderExecutionDialog({
         updated_at: new Date().toISOString(),
         latitude_inicio: gpsLocal?.latitude || null,
         longitude_inicio: gpsLocal?.longitude || null,
-        latitude_fim: null,
-        longitude_fim: null,
       };
-
-      // Se há observações de execução, adiciona ao campo observacoes
-      if (data.observacoes_execucao) {
-        const observacoesAtuais = serviceOrder.observacoes || "";
-        updateData.observacoes = observacoesAtuais 
-          ? `${observacoesAtuais}\n\n--- Execução ---\n${data.observacoes_execucao}`
-          : `--- Execução ---\n${data.observacoes_execucao}`;
-      }
 
       const { error: updateError } = await supabase
         .from("service_orders")
@@ -116,18 +102,14 @@ export function ServiceOrderExecutionDialog({
 
       if (updateError) throw updateError;
 
-      // Registrar no histórico com detalhes completos
-      const custoMaoObra = data.tempo_gasto_horas * hourlyRate;
-      
+      // Histórico
       const execucaoDetalhada = [
-        `📝 Serviços: ${data.descricao_servicos.substring(0, 100)}${data.descricao_servicos.length > 100 ? '...' : ''}`,
-        `⏱️ Tempo: ${data.tempo_gasto_horas}h`,
-        `💼 Mão de obra: R$ ${custoMaoObra.toFixed(2)} (R$ ${hourlyRate}/h)`,
-        `🔧 Peças: R$ ${(data.custo_pecas || 0).toFixed(2)}`,
-        `💰 Total: R$ ${custoTotal.toFixed(2)}`,
-        `📸 Fotos: ${uploadedImages.length}`,
-        `✅ Status: ${data.finalizar ? "Finalizada" : "Executada"}`
-      ].join(" | ");
+        `📝 ${data.descricao_servicos.substring(0, 120)}${data.descricao_servicos.length > 120 ? "…" : ""}`,
+        data.tempo_gasto_horas ? `⏱️ ${data.tempo_gasto_horas}h` : null,
+        (data.custo_pecas || 0) > 0 ? `🔧 Peças: R$ ${(data.custo_pecas || 0).toFixed(2)}` : null,
+        `📸 ${uploadedImages.length} foto(s)`,
+        `✅ ${finalizar ? "Finalizada" : "Executada"}`,
+      ].filter(Boolean).join(" | ");
 
       const { error: historyError } = await supabase.from("service_order_history").insert({
         service_order_id: serviceOrder.id,
@@ -135,28 +117,20 @@ export function ServiceOrderExecutionDialog({
         campo_alterado: "Execução",
         valor_anterior: "-",
         valor_novo: execucaoDetalhada,
-        observacao: data.observacoes_execucao || "Execução registrada",
+        observacao: "Execução registrada",
       });
-
-      if (historyError) {
-        console.error("Erro ao registrar histórico:", historyError);
-      }
+      if (historyError) console.error("Erro ao registrar histórico:", historyError);
 
       // Notificar cliente via WhatsApp (fire and forget)
       supabase.functions.invoke("notify-os-status", {
-        body: {
-          service_order_id: serviceOrder.id,
-          new_status: novoStatus,
-          observacao: data.observacoes_execucao,
-        },
+        body: { service_order_id: serviceOrder.id, new_status: novoStatus },
       }).then(res => {
         if (res.error) console.error("Erro ao notificar cliente:", res.error);
-        else console.log("Notificação WhatsApp enviada:", res.data);
       }).catch(err => console.error("Erro ao chamar notify-os-status:", err));
 
       toast({
-        title: "Execução registrada!",
-        description: `OS #${serviceOrder.numero_os} ${data.finalizar ? "finalizada" : "marcada como executada"}.`,
+        title: finalizar ? "OS finalizada!" : "Execução salva!",
+        description: `OS #${serviceOrder.numero_os} ${finalizar ? "finalizada" : "marcada como executada"}.`,
       });
 
       form.reset();
@@ -174,9 +148,12 @@ export function ServiceOrderExecutionDialog({
     }
   };
 
+  const submitWith = (finalizar: boolean) =>
+    form.handleSubmit((data) => onSubmit(data, finalizar))();
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
+      <DialogContent className="max-w-lg max-h-[90vh] overflow-y-auto">
         <DialogHeader>
           <DialogTitle>Registrar Execução</DialogTitle>
           <DialogDescription>
@@ -188,34 +165,21 @@ export function ServiceOrderExecutionDialog({
         </DialogHeader>
 
         <Form {...form}>
-          <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-4">
-            <FormField
-              control={form.control}
-              name="data_execucao"
-              render={({ field }) => (
-                <FormItem>
-                  <FormLabel>Data de Execução</FormLabel>
-                  <FormControl>
-                    <Input type="date" {...field} max={new Date().toISOString().split('T')[0]} />
-                  </FormControl>
-                  <FormMessage />
-                </FormItem>
-              )}
-            />
-
+          <form onSubmit={(e) => e.preventDefault()} className="space-y-4">
+            {/* Campo único: o que foi feito */}
             <FormField
               control={form.control}
               name="descricao_servicos"
               render={({ field }) => (
                 <FormItem>
                   <div className="flex items-center justify-between">
-                    <FormLabel>Serviço Realizado *</FormLabel>
+                    <FormLabel>O que foi feito? *</FormLabel>
                     <div className="flex gap-1">
                       <AIExecutionReport
                         titulo={serviceOrder?.descricao_servicos}
                         descricao={field.value || ''}
                         tempoGasto={form.watch('tempo_gasto_horas')}
-                        observacoes={form.watch('observacoes_execucao')}
+                        observacoes={''}
                         tipoServico={serviceOrder?.tipo_servico}
                         onApply={(text) => field.onChange(text)}
                       />
@@ -226,81 +190,20 @@ export function ServiceOrderExecutionDialog({
                     </div>
                   </div>
                   <FormControl>
-                    <Textarea 
-                      {...field} 
+                    <Textarea
+                      {...field}
                       rows={5}
-                      placeholder="Descreva detalhadamente o serviço realizado..." 
+                      placeholder="Descreva o serviço realizado. Use o microfone para ditar ou a IA para gerar o texto."
                     />
                   </FormControl>
-                  <FormDescription>
-                    Mínimo de 20 caracteres ({field.value?.length || 0}/20)
-                  </FormDescription>
                   <FormMessage />
                 </FormItem>
               )}
             />
 
-            <FormField
-              control={form.control}
-              name="tempo_gasto_horas"
-              render={({ field }) => (
-                <FormItem>
-                  <FormLabel>Tempo Gasto (horas)</FormLabel>
-                  <FormControl>
-                    <Input 
-                      type="number" 
-                      step="0.25" 
-                      min="0.25" 
-                      max="24"
-                      {...field}
-                      onChange={(e) => field.onChange(parseFloat(e.target.value))}
-                    />
-                  </FormControl>
-                  <FormDescription>Mínimo: 0.25h (15 min) | Máximo: 24h</FormDescription>
-                  <FormMessage />
-                </FormItem>
-              )}
-            />
-
-            <FormField
-              control={form.control}
-              name="custo_pecas"
-              render={({ field }) => (
-                <FormItem>
-                  <FormLabel>Custo de Peças (R$)</FormLabel>
-                  <FormControl>
-                    <Input 
-                      type="number" 
-                      step="0.01" 
-                      min="0"
-                      placeholder="0.00"
-                      {...field}
-                      onChange={(e) => field.onChange(parseFloat(e.target.value) || 0)}
-                    />
-                  </FormControl>
-                  <FormDescription>Deixe em 0 se não houver custo de peças</FormDescription>
-                  <FormMessage />
-                </FormItem>
-              )}
-            />
-
-            <div className="space-y-3">
-              <label className="text-sm font-medium">Localização do Atendimento</label>
-              <GeolocationCapture
-                label="Local do Serviço"
-                position={gpsLocal}
-                loading={geoLocal.loading}
-                error={geoLocal.error}
-                onCapture={async () => {
-                  const pos = await geoLocal.captureLocation();
-                  if (pos) setGpsLocal(pos);
-                }}
-                disabled={loading}
-              />
-            </div>
-
+            {/* Fotos (prova do atendimento) */}
             <div className="space-y-2">
-              <label className="text-sm font-medium">Fotos do Atendimento</label>
+              <label className="text-sm font-medium">Fotos do Atendimento (opcional)</label>
               <ImageUpload
                 bucketName="service-order-photos"
                 maxImages={5}
@@ -310,70 +213,83 @@ export function ServiceOrderExecutionDialog({
               />
             </div>
 
-            <FormField
-              control={form.control}
-              name="observacoes_execucao"
-              render={({ field }) => (
-                <FormItem>
-                  <div className="flex items-center justify-between">
-                    <FormLabel>Observações da Execução</FormLabel>
-                    <VoiceInputButton
-                      onFinalResult={(text) => field.onChange(field.value ? `${field.value} ${text}` : text)}
-                      size="sm"
+            {/* Detalhes opcionais (recolhido) */}
+            <div className="rounded-md border">
+              <button
+                type="button"
+                onClick={() => setShowDetails((v) => !v)}
+                className="w-full flex items-center justify-between px-3 py-2 text-sm font-medium text-muted-foreground hover:bg-muted/50"
+              >
+                <span>Detalhes opcionais (data, tempo, peças)</span>
+                <ChevronDown className={`h-4 w-4 transition-transform ${showDetails ? "rotate-180" : ""}`} />
+              </button>
+              {showDetails && (
+                <div className="p-3 pt-1 space-y-3 border-t">
+                  <FormField
+                    control={form.control}
+                    name="data_execucao"
+                    render={({ field }) => (
+                      <FormItem>
+                        <FormLabel className="text-xs">Data de execução</FormLabel>
+                        <FormControl>
+                          <Input type="date" {...field} max={hoje()} />
+                        </FormControl>
+                        <FormMessage />
+                      </FormItem>
+                    )}
+                  />
+                  <div className="grid grid-cols-2 gap-3">
+                    <FormField
+                      control={form.control}
+                      name="tempo_gasto_horas"
+                      render={({ field }) => (
+                        <FormItem>
+                          <FormLabel className="text-xs">Tempo gasto (horas)</FormLabel>
+                          <FormControl>
+                            <Input
+                              type="number" step="0.25" min="0" max="24" placeholder="—"
+                              value={field.value ?? ""}
+                              onChange={(e) => field.onChange(e.target.value === "" ? undefined : parseFloat(e.target.value))}
+                            />
+                          </FormControl>
+                          <FormMessage />
+                        </FormItem>
+                      )}
+                    />
+                    <FormField
+                      control={form.control}
+                      name="custo_pecas"
+                      render={({ field }) => (
+                        <FormItem>
+                          <FormLabel className="text-xs">Custo de peças (R$)</FormLabel>
+                          <FormControl>
+                            <Input
+                              type="number" step="0.01" min="0" placeholder="0,00"
+                              value={field.value ?? ""}
+                              onChange={(e) => field.onChange(parseFloat(e.target.value) || 0)}
+                            />
+                          </FormControl>
+                          <FormMessage />
+                        </FormItem>
+                      )}
                     />
                   </div>
-                  <FormControl>
-                    <Textarea {...field} rows={3} placeholder="Descreva o que foi realizado..." />
-                  </FormControl>
-                  <FormMessage />
-                </FormItem>
+                </div>
               )}
-            />
-
-            <FormField
-              control={form.control}
-              name="finalizar"
-              render={({ field }) => (
-                <FormItem className="flex flex-row items-start space-x-3 space-y-0 rounded-md border p-4">
-                  <FormControl>
-                    <Checkbox
-                      checked={field.value}
-                      onCheckedChange={field.onChange}
-                    />
-                  </FormControl>
-                  <div className="space-y-1 leading-none">
-                    <FormLabel>Finalizar Ordem de Serviço</FormLabel>
-                    <FormDescription>
-                      Marque para finalizar a OS. Se não marcar, ficará como "Executada".
-                    </FormDescription>
-                  </div>
-                </FormItem>
-              )}
-            />
-
-            {/* Preview do Custo Total */}
-            <div className="bg-muted p-3 rounded-lg">
-              <p className="text-sm font-medium">Custo Total Estimado</p>
-              <p className="text-2xl font-bold">
-                R$ {((form.watch("tempo_gasto_horas") * 80) + (form.watch("custo_pecas") || 0)).toFixed(2)}
-              </p>
-              <p className="text-xs text-muted-foreground mt-1">
-                Mão de obra (R$ 80/h) + Peças
-              </p>
             </div>
 
             {/* Botões */}
-            <div className="flex gap-2 justify-end">
-              <Button
-                type="button"
-                variant="outline"
-                onClick={() => onOpenChange(false)}
-                disabled={loading}
-              >
+            <div className="flex flex-col-reverse sm:flex-row gap-2 sm:justify-end pt-1">
+              <Button type="button" variant="outline" onClick={() => onOpenChange(false)} disabled={loading}>
                 Cancelar
               </Button>
-              <Button type="submit" disabled={loading}>
-                {loading ? "Registrando..." : "Registrar Execução"}
+              <Button type="button" variant="secondary" onClick={() => submitWith(false)} disabled={loading}>
+                {loading ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <Save className="h-4 w-4 mr-2" />}
+                Salvar
+              </Button>
+              <Button type="button" onClick={() => submitWith(true)} disabled={loading} className="bg-green-600 hover:bg-green-700">
+                {loading ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <CheckCircle2 className="h-4 w-4 mr-2" />}
+                Finalizar OS
               </Button>
             </div>
           </form>

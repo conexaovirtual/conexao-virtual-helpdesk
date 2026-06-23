@@ -21,6 +21,27 @@ function formatPhone(contato: string): string | null {
   return `55${digits}`;
 }
 
+// Deduplicação: evita reenviar a mesma transição de status para o mesmo atendimento.
+async function alreadyNotified(supabase: any, entityId: string, status: string): Promise<boolean> {
+  const { data } = await supabase
+    .from("whatsapp_notification_log")
+    .select("status")
+    .eq("entity_type", "daily_record")
+    .eq("entity_id", entityId)
+    .order("sent_at", { ascending: false })
+    .limit(1);
+  return !!(data && data.length && data[0].status === status);
+}
+
+async function logNotification(supabase: any, entityId: string, status: string, phone: string | null): Promise<void> {
+  await supabase.from("whatsapp_notification_log").insert({
+    entity_type: "daily_record",
+    entity_id: entityId,
+    status,
+    phone,
+  });
+}
+
 serve(async (req: Request) => {
   if (req.method === "OPTIONS") {
     return new Response(null, { headers: corsHeaders });
@@ -59,10 +80,18 @@ serve(async (req: Request) => {
       Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
     );
 
-    // Get the daily record with ticket info
+    // DEDUP: se a última notificação desse atendimento já foi esse mesmo status, não reenvia.
+    if (await alreadyNotified(supabase, daily_record_id, new_status)) {
+      console.log(`Skip duplicate daily record notification (status: ${new_status})`);
+      return new Response(
+        JSON.stringify({ skipped: true, reason: "duplicate status" }),
+        { headers: { "Content-Type": "application/json", ...corsHeaders } }
+      );
+    }
+
     const { data: record, error: recordError } = await supabase
       .from("daily_service_records")
-      .select("ticket_id, company_id, titulo, descricao, solucao")
+      .select("ticket_id, company_id, titulo, descricao, solucao, asset_id, tecnico_id")
       .eq("id", daily_record_id)
       .single();
 
@@ -74,7 +103,6 @@ serve(async (req: Request) => {
       );
     }
 
-    // Try to get contact from the linked ticket
     let phone: string | null = null;
     let contactName: string | null = null;
 
@@ -91,7 +119,6 @@ serve(async (req: Request) => {
       }
     }
 
-    // Fallback 1: try company WhatsApp field
     if (!phone && record.company_id) {
       const { data: company } = await supabase
         .from("companies")
@@ -104,14 +131,12 @@ serve(async (req: Request) => {
         if (company.whatsapp) {
           phone = formatPhone(company.whatsapp);
         }
-        // Fallback 2: try company telefone
         if (!phone && company.telefone) {
           phone = formatPhone(company.telefone);
         }
       }
     }
 
-    // Fallback 3: try whatsapp_contacts table
     if (!phone && record.company_id) {
       const { data: contacts } = await supabase
         .from("whatsapp_contacts")
@@ -134,7 +159,6 @@ serve(async (req: Request) => {
       );
     }
 
-    // Busca dados do técnico
     let tecnico: { nome: string } | null = null;
     if (record.tecnico_id) {
       const { data } = await supabase
@@ -145,7 +169,20 @@ serve(async (req: Request) => {
       tecnico = data;
     }
 
-    // Build message comprovante completo
+    let equipamentoLabel: string | null = null;
+    if (record.asset_id) {
+      const { data: asset } = await supabase
+        .from("assets")
+        .select("nome, modelo, tag_patrimonial")
+        .eq("id", record.asset_id)
+        .single();
+      if (asset) {
+        equipamentoLabel = asset.nome;
+        if (asset.modelo) equipamentoLabel += ` (${asset.modelo})`;
+        if (asset.tag_patrimonial) equipamentoLabel += ` - Patrimônio: ${asset.tag_patrimonial}`;
+      }
+    }
+
     const now = new Date();
     const dataHora = now.toLocaleString("pt-BR", {
       timeZone: "America/Sao_Paulo",
@@ -159,6 +196,10 @@ serve(async (req: Request) => {
 
     if (contactName) {
       message += `\n🏢 *Empresa:* ${contactName}`;
+    }
+
+    if (equipamentoLabel) {
+      message += `\n🖥️ *Equipamento:* ${equipamentoLabel}`;
     }
 
     if (tecnico?.nome) {
@@ -197,6 +238,9 @@ serve(async (req: Request) => {
 
     const result = await response.json();
     console.log("Mabbix notification response:", JSON.stringify(result).substring(0, 300));
+
+    // Registra no log para deduplicação das próximas chamadas.
+    await logNotification(supabase, daily_record_id, new_status, phone);
 
     return new Response(
       JSON.stringify({ success: true, phone, status: new_status }),

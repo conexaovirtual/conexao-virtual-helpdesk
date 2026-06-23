@@ -6,7 +6,7 @@ import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Skeleton } from '@/components/ui/skeleton';
-import { ArrowLeft, Clock, User, Package, AlertCircle, PlayCircle, Calendar as CalendarIcon, Loader2 } from 'lucide-react';
+import { ArrowLeft, Clock, User, Package, AlertCircle, PlayCircle, Calendar as CalendarIcon, Loader2, Receipt } from 'lucide-react';
 import { format } from 'date-fns';
 import { ptBR } from 'date-fns/locale';
 import { TicketTimeline } from '@/components/tickets/TicketTimeline';
@@ -24,6 +24,7 @@ import { Calendar } from '@/components/ui/calendar';
 import { toast } from 'sonner';
 import { AITriageCard } from '@/components/ai/AITriageCard';
 import { AIDiagnosticButton } from '@/components/ai/AIDiagnosticButton';
+import { OrcamentoBomControle } from '@/components/service-orders/OrcamentoBomControle';
 
 export default function TicketDetail() {
   const { id } = useParams();
@@ -32,6 +33,7 @@ export default function TicketDetail() {
   const [ticket, setTicket] = useState<any>(null);
   const [loading, setLoading] = useState(true);
   const [isServiceOrderDialogOpen, setIsServiceOrderDialogOpen] = useState(false);
+  const [isOrcamentoOpen, setIsOrcamentoOpen] = useState(false);
   
   // States for service actions
   const [showActionDialog, setShowActionDialog] = useState(false);
@@ -78,7 +80,7 @@ export default function TicketDetail() {
       .from('tickets')
       .select(`
         *,
-        companies:company_id(nome_fantasia),
+        companies:company_id(id, nome_fantasia, cnpj, whatsapp, telefone, bomcontrole_cliente_id),
         categories:category_id(nome, cor),
         subcategories:subcategory_id(nome),
         assets:asset_id(tipo, tag_patrimonial, numero_serie, fabricante, modelo),
@@ -377,12 +379,32 @@ export default function TicketDetail() {
                         <CardTitle className="text-base">Ordem de Serviço</CardTitle>
                       </CardHeader>
                       <CardContent>
-                        <Button 
+                        <Button
                           onClick={() => setIsServiceOrderDialogOpen(true)}
                           className="w-full"
                         >
                           <FileText className="h-4 w-4 mr-2" />
                           Gerar OS
+                        </Button>
+                      </CardContent>
+                    </Card>
+                  )}
+
+                  {ticket.status !== 'cancelado' && (
+                    <Card>
+                      <CardHeader>
+                        <CardTitle className="text-base">Orçamento</CardTitle>
+                      </CardHeader>
+                      <CardContent>
+                        <Button
+                          onClick={() => setIsOrcamentoOpen(true)}
+                          className="w-full"
+                          variant={ticket.bomcontrole_orcamento_id ? "outline" : "default"}
+                        >
+                          <Receipt className="h-4 w-4 mr-2" />
+                          {ticket.bomcontrole_orcamento_id
+                            ? `Orçamento #${ticket.bomcontrole_orcamento_id}`
+                            : 'Gerar Orçamento'}
                         </Button>
                       </CardContent>
                     </Card>
@@ -479,6 +501,20 @@ export default function TicketDetail() {
           open={isServiceOrderDialogOpen}
           onOpenChange={setIsServiceOrderDialogOpen}
           ticket={ticket}
+          onSuccess={loadTicket}
+        />
+
+        <OrcamentoBomControle
+          open={isOrcamentoOpen}
+          onOpenChange={setIsOrcamentoOpen}
+          ticketId={ticket.id}
+          serviceOrder={{
+            numero_os: ticket.numero,
+            companies: ticket.companies,
+            bomcontrole_orcamento_id: ticket.bomcontrole_orcamento_id,
+            bomcontrole_orcamento_url: ticket.bomcontrole_orcamento_url,
+            bomcontrole_orcamento_status: ticket.bomcontrole_orcamento_status,
+          }}
           onSuccess={loadTicket}
         />
       </div>

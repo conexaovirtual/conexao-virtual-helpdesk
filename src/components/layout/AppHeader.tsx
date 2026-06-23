@@ -32,7 +32,7 @@ export function AppHeader() {
   if (!profile) return null;
 
   return (
-    <header className="sticky top-0 z-50 h-12 flex items-center border-b bg-card/80 backdrop-blur supports-[backdrop-filter]:bg-card/60 px-4 gap-3">
+    <header className="sticky top-0 z-50 min-h-12 flex items-center border-b bg-card/80 backdrop-blur supports-[backdrop-filter]:bg-card/60 gap-3 pt-[env(safe-area-inset-top)] pl-[max(1rem,env(safe-area-inset-left))] pr-[max(1rem,env(safe-area-inset-right))]">
       <SidebarTrigger />
 
       <div className="flex-1" />

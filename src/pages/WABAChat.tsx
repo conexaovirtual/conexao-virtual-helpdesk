@@ -66,12 +66,20 @@ const WABAChat = () => {
   useEffect(() => {
     if (!user) return;
 
+    // PostgREST caps selects at 1000 rows; page through everything. Conversations
+    // that never had a message (null last_message_at) go to the bottom.
     const fetchConversations = async () => {
-      const { data } = await supabase
-        .from("waba_conversations")
-        .select("*")
-        .order("last_message_at", { ascending: false });
-      if (data) setConversations(data as Conversation[]);
+      const all: Conversation[] = [];
+      for (let from = 0; ; from += 1000) {
+        const { data } = await supabase
+          .from("waba_conversations")
+          .select("*")
+          .order("last_message_at", { ascending: false, nullsFirst: false })
+          .range(from, from + 999);
+        if (data) all.push(...(data as Conversation[]));
+        if (!data || data.length < 1000) break;
+      }
+      setConversations(all);
     };
 
     fetchConversations();

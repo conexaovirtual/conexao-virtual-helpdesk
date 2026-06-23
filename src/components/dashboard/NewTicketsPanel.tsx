@@ -179,7 +179,7 @@ export function NewTicketsPanel() {
             )}
           </CardTitle>
           <div className="flex items-center gap-1">
-            <Button variant="ghost" size="icon" className="h-7 w-7" onClick={loadNewTickets}>
+            <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => loadNewTickets()}>
               <RefreshCw className="h-3 w-3" />
             </Button>
             <Button variant="ghost" size="sm" className="h-7 text-xs" onClick={() => navigate("/tickets")}>

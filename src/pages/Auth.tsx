@@ -39,46 +39,24 @@ export default function Auth() {
     try {
       const validatedData = authSchema.parse({ email, password });
 
-      const { data, error } = await supabase.functions.invoke("auth-with-rate-limit", {
-        body: { email: validatedData.email, password: validatedData.password },
+      const { error } = await supabase.auth.signInWithPassword({
+        email: validatedData.email,
+        password: validatedData.password,
       });
 
       if (error) {
-        if (error.message?.includes("tentativas") || error.message?.includes("Muitas")) {
-          toast.error("Muitas tentativas de login. Aguarde 1 minuto.");
+        if (error.status === 429) {
+          toast.error("Muitas tentativas de login. Aguarde antes de tentar novamente.");
         } else {
           toast.error("E-mail ou senha inválidos");
         }
         return;
       }
 
-      if (data?.session) {
-        const { error: sessionError } = await supabase.auth.setSession({
-          access_token: data.session.access_token,
-          refresh_token: data.session.refresh_token,
-        });
-        if (sessionError) {
-          toast.error("Erro ao configurar sessão");
-          return;
-        }
-        await new Promise<void>((resolve) => {
-          const unsub = supabase.auth.onAuthStateChange((_event, sess) => {
-            if (sess) {
-              unsub.data.subscription.unsubscribe();
-              resolve();
-            }
-          });
-          setTimeout(resolve, 3000);
-        });
-      }
-
-      toast.success("Login realizado com sucesso!");
       navigate(redirectUrl || "/dashboard");
     } catch (error: any) {
       if (error.errors) {
         toast.error(error.errors[0]?.message || "Dados inválidos");
-      } else if (error.message?.includes("429") || error.message?.includes("tentativas")) {
-        toast.error("Muitas tentativas de login. Aguarde antes de tentar novamente.");
       } else {
         toast.error(error.message || "Erro ao fazer login");
       }

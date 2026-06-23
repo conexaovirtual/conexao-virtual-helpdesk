@@ -36,7 +36,7 @@ serve(async (req: Request) => {
 
     switch (action) {
       case "send_text": {
-        const { phone, text, conversation_id } = params;
+        const { phone, text, conversation_id, open_ticket } = params;
 
         // Send via Mabbix API
         const response = await fetch(
@@ -49,7 +49,7 @@ serve(async (req: Request) => {
             },
             body: JSON.stringify({
               number: phone,
-              openTicket: "0",
+              openTicket: open_ticket ? "1" : "0",
               queueId: "0",
               body: text,
             }),
@@ -59,37 +59,39 @@ serve(async (req: Request) => {
         const result = await response.json();
         console.log("Mabbix API response:", JSON.stringify(result).substring(0, 300));
 
-        // Save outbound message to DB
-        const messageId = result?.id || result?.message?.id || null;
-        await supabase.from("waba_messages").insert({
-          conversation_id,
-          wamid: messageId ? String(messageId) : null,
-          direction: "outbound",
-          message_type: "text",
-          content: text,
-          status: "sent",
-          sender_type: "agent",
-        });
+        // Save outbound message to DB only if linked to a conversation
+        if (conversation_id) {
+          const messageId = result?.id || result?.message?.id || null;
+          await supabase.from("waba_messages").insert({
+            conversation_id,
+            wamid: messageId ? String(messageId) : null,
+            direction: "outbound",
+            message_type: "text",
+            content: text,
+            status: "sent",
+            sender_type: "agent",
+          });
 
-        // Update conversation: last_message, first_response, queue_status
-        const { data: conv } = await supabase
-          .from("waba_conversations")
-          .select("first_response_at, queue_status")
-          .eq("id", conversation_id)
-          .single();
+          // Update conversation: last_message, first_response, queue_status
+          const { data: conv } = await supabase
+            .from("waba_conversations")
+            .select("first_response_at, queue_status")
+            .eq("id", conversation_id)
+            .single();
 
-        const updates: any = { last_message_at: new Date().toISOString() };
-        if (!conv?.first_response_at) {
-          updates.first_response_at = new Date().toISOString();
+          const updates: any = { last_message_at: new Date().toISOString() };
+          if (!conv?.first_response_at) {
+            updates.first_response_at = new Date().toISOString();
+          }
+          if (conv?.queue_status === "waiting") {
+            updates.queue_status = "assigned";
+          }
+
+          await supabase
+            .from("waba_conversations")
+            .update(updates)
+            .eq("id", conversation_id);
         }
-        if (conv?.queue_status === "waiting") {
-          updates.queue_status = "assigned";
-        }
-
-        await supabase
-          .from("waba_conversations")
-          .update(updates)
-          .eq("id", conversation_id);
 
         return new Response(JSON.stringify(result), {
           headers: { "Content-Type": "application/json", ...corsHeaders },
@@ -97,7 +99,7 @@ serve(async (req: Request) => {
       }
 
       case "send_media": {
-        const { phone, media_url, filename, caption, media_type, conversation_id } = params;
+        const { phone, media_url, filename, caption, media_type, conversation_id, open_ticket } = params;
 
         // Mabbix/Whaticket expects multipart/form-data with binary file in `medias` field
         const fileResp = await fetch(media_url);
@@ -107,7 +109,7 @@ serve(async (req: Request) => {
 
         const form = new FormData();
         form.append("number", phone);
-        form.append("openTicket", "0");
+        form.append("openTicket", open_ticket ? "1" : "0");
         form.append("queueId", "0");
         form.append("body", caption || "");
         form.append("medias", fileBlob, filename || "arquivo");
@@ -120,29 +122,31 @@ serve(async (req: Request) => {
         const result = await response.json();
         console.log("Mabbix media (multipart) response:", JSON.stringify(result).substring(0, 400));
 
-        const messageId = result?.id || result?.message?.id || result?.retorno?.id || null;
-        await supabase.from("waba_messages").insert({
-          conversation_id,
-          wamid: messageId ? String(messageId) : null,
-          direction: "outbound",
-          message_type: media_type || "document",
-          content: caption || `[${filename || "Arquivo"}]`,
-          media_url,
-          status: "sent",
-          sender_type: "agent",
-        });
+        if (conversation_id) {
+          const messageId = result?.id || result?.message?.id || result?.retorno?.id || null;
+          await supabase.from("waba_messages").insert({
+            conversation_id,
+            wamid: messageId ? String(messageId) : null,
+            direction: "outbound",
+            message_type: media_type || "document",
+            content: caption || `[${filename || "Arquivo"}]`,
+            media_url,
+            status: "sent",
+            sender_type: "agent",
+          });
 
-        const { data: conv } = await supabase
-          .from("waba_conversations")
-          .select("first_response_at, queue_status")
-          .eq("id", conversation_id)
-          .single();
+          const { data: conv } = await supabase
+            .from("waba_conversations")
+            .select("first_response_at, queue_status")
+            .eq("id", conversation_id)
+            .single();
 
-        const updates: any = { last_message_at: new Date().toISOString() };
-        if (!conv?.first_response_at) updates.first_response_at = new Date().toISOString();
-        if (conv?.queue_status === "waiting") updates.queue_status = "assigned";
+          const updates: any = { last_message_at: new Date().toISOString() };
+          if (!conv?.first_response_at) updates.first_response_at = new Date().toISOString();
+          if (conv?.queue_status === "waiting") updates.queue_status = "assigned";
 
-        await supabase.from("waba_conversations").update(updates).eq("id", conversation_id);
+          await supabase.from("waba_conversations").update(updates).eq("id", conversation_id);
+        }
 
         return new Response(JSON.stringify(result), {
           headers: { "Content-Type": "application/json", ...corsHeaders },

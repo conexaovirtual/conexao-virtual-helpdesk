@@ -89,11 +89,49 @@ async function refreshAccessToken(supabase: any, storedToken: StoredToken, datto
   return newAccessToken;
 }
 
+// Autentica via API Key + Secret do Datto (password grant) — sem login manual, renovável sempre.
+async function mintTokenWithApiKey(supabase: any, dattoApiUrl: string, storedToken: StoredToken | null): Promise<string> {
+  const apiKey = Deno.env.get("DATTO_API_KEY");
+  const apiSecret = Deno.env.get("DATTO_API_SECRET_KEY");
+  if (!apiKey || !apiSecret) {
+    throw new Error("Token Datto expirado e sem refresh_token. Configure DATTO_API_KEY/DATTO_API_SECRET_KEY ou reautorize o Datto.");
+  }
+  const tokenUrl = `${dattoApiUrl}/auth/oauth/token`;
+  const response = await fetch(tokenUrl, {
+    method: "POST",
+    headers: {
+      Authorization: `Basic ${btoa("public-client:public")}`,
+      "Content-Type": "application/x-www-form-urlencoded",
+      Accept: "application/json",
+    },
+    body: new URLSearchParams({ grant_type: "password", username: apiKey, password: apiSecret }).toString(),
+  });
+  const body = await response.text();
+  if (!response.ok) throw new Error(`Falha ao autenticar no Datto via API Key (${response.status}).`);
+  const tokenData = JSON.parse(body);
+  const accessToken = tokenData.access_token as string;
+  if (!accessToken) throw new Error("access_token não retornado na autenticação via API Key.");
+  const refreshToken = (tokenData.refresh_token as string | undefined) || null;
+  const expiresAt = tokenData.expires_in ? new Date(Date.now() + tokenData.expires_in * 1000).toISOString() : null;
+  if (storedToken) {
+    await supabase.from("datto_oauth_tokens").update({ access_token: accessToken, refresh_token: refreshToken, expires_at: expiresAt, updated_at: new Date().toISOString() }).eq("id", storedToken.id);
+  } else {
+    await supabase.from("datto_oauth_tokens").insert({ access_token: accessToken, refresh_token: refreshToken, expires_at: expiresAt });
+  }
+  return accessToken;
+}
+
 async function getDattoAccessToken(supabase: any, dattoApiUrl: string): Promise<string> {
   const storedToken = await getStoredToken(supabase);
-  if (!storedToken) throw new Error("Nenhum token Datto encontrado. Autorize o Datto RMM primeiro.");
-  if (isTokenExpired(storedToken)) return await refreshAccessToken(supabase, storedToken, dattoApiUrl);
-  return storedToken.access_token;
+  if (storedToken && !isTokenExpired(storedToken)) return storedToken.access_token;
+  if (storedToken?.refresh_token) {
+    try {
+      return await refreshAccessToken(supabase, storedToken, dattoApiUrl);
+    } catch (e) {
+      console.warn("[Datto] Refresh falhou, tentando API Key:", (e as Error).message);
+    }
+  }
+  return await mintTokenWithApiKey(supabase, dattoApiUrl, storedToken);
 }
 
 // ── Datto API calls ──

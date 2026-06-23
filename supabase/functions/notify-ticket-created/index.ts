@@ -18,6 +18,27 @@ interface TicketNotificationRequest {
   descricao: string;
 }
 
+// Dedup: a notificação de criação de um chamado deve sair só uma vez.
+async function alreadyNotified(supabase: any, ticketId: string): Promise<boolean> {
+  const { data } = await supabase
+    .from("whatsapp_notification_log")
+    .select("id")
+    .eq("entity_type", "ticket")
+    .eq("entity_id", ticketId)
+    .eq("status", "created")
+    .limit(1);
+  return !!(data && data.length);
+}
+
+async function logNotification(supabase: any, ticketId: string, phone: string | null): Promise<void> {
+  await supabase.from("whatsapp_notification_log").insert({
+    entity_type: "ticket",
+    entity_id: ticketId,
+    status: "created",
+    phone,
+  });
+}
+
 const handler = async (req: Request): Promise<Response> => {
   // Handle CORS preflight requests
   if (req.method === "OPTIONS") {
@@ -38,6 +59,19 @@ const handler = async (req: Request): Promise<Response> => {
     }: TicketNotificationRequest = await req.json();
 
     console.log("Notificando novo ticket:", { ticketId, ticketNumero });
+
+    // DEDUP: se este chamado já gerou notificação de criação, não reenvia (evita duplicados).
+    const supabaseDedup = createClient(
+      Deno.env.get("SUPABASE_URL")!,
+      Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
+    );
+    if (await alreadyNotified(supabaseDedup, ticketId)) {
+      console.log(`Skip duplicate ticket-created notification for ${ticketId}`);
+      return new Response(
+        JSON.stringify({ skipped: true, reason: "duplicate ticket notification" }),
+        { status: 200, headers: { "Content-Type": "application/json", ...corsHeaders } }
+      );
+    }
 
     // Buscar email do administrador
     const adminEmail = Deno.env.get("ADMIN_EMAIL") || "admin@example.com";
@@ -281,6 +315,9 @@ const handler = async (req: Request): Promise<Response> => {
     } catch (waErr) {
       console.error("Error sending WhatsApp confirmation:", waErr);
     }
+
+    // Registra a notificação deste chamado para deduplicar reenvios futuros.
+    await logNotification(supabaseDedup, ticketId, null);
 
     return new Response(JSON.stringify({ success: true, emailResponse: data }), {
       status: 200,

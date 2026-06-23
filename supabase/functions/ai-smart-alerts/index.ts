@@ -146,7 +146,7 @@ serve(async (req) => {
       }
     };
 
-    // Chamar Lovable AI Gateway para gerar alertas inteligentes
+    // Chamar OpenAI para gerar alertas inteligentes
     const aiResponse = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: {

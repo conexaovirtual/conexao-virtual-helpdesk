@@ -9,7 +9,7 @@ import { Badge } from "@/components/ui/badge";
 import {
   Send, Bot, UserRound, Phone, CheckCheck, Check, Clock,
   MessageSquare, Info, Ticket, ArrowLeft, AlertTriangle, CheckCircle2,
-  Sparkles, Headphones, Shield, Paperclip, Loader2
+  Sparkles, Headphones, Shield, Paperclip, Loader2, Smartphone
 } from "lucide-react";
 import { format } from "date-fns";
 import { toast } from "sonner";
@@ -346,6 +346,7 @@ export function ChatArea({ conversation, onToggleInfo, showInfo, onBack }: ChatA
 
                   const isOutbound = msg.direction === "outbound";
                   const isAI = msg.sender_type === "ai";
+                  const isPhone = msg.sender_type === "phone";
 
                   return (
                     <div key={msg.id} className={`flex ${isOutbound ? "justify-end" : "justify-start"}`}>
@@ -357,10 +358,10 @@ export function ChatArea({ conversation, onToggleInfo, showInfo, onBack }: ChatA
                           : "bg-card rounded-bl-sm border"
                       }`}>
                         {isOutbound && msg.sender_type !== "user" && (
-                          <div className={`flex items-center gap-1 mb-1 ${isAI ? "text-white/70" : "text-white/70"}`}>
-                            {isAI ? <Sparkles className="h-3 w-3" /> : <UserRound className="h-3 w-3" />}
+                          <div className="flex items-center gap-1 mb-1 text-white/70">
+                            {isAI ? <Sparkles className="h-3 w-3" /> : isPhone ? <Smartphone className="h-3 w-3" /> : <UserRound className="h-3 w-3" />}
                             <span className="text-[10px] font-semibold tracking-wide">
-                              {isAI ? "ASSISTENTE IA" : "TÉCNICO"}
+                              {isAI ? "ASSISTENTE IA" : isPhone ? "VIA CELULAR" : "TÉCNICO"}
                             </span>
                           </div>
                         )}

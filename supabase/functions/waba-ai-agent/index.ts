@@ -70,6 +70,20 @@ serve(async (req: Request) => {
       effectiveMessage = `[O cliente enviou uma mensagem de voz que foi transcrita automaticamente]: ${transcription}`;
     }
 
+    // Download image so the model can analyze it (gpt-4o-mini tem visão)
+    const isImageMessage = message_type === "image";
+    let imageDataUrl: string | null = null;
+    const isPlaceholder = (c?: string) =>
+      !c || !c.trim() || c === "[Mensagem sem texto]" || /^[a-f0-9-]+_[A-Z0-9]+\.\w+$/.test(c.trim());
+    if (isImageMessage && media_url) {
+      console.log("Fetching image from:", media_url);
+      imageDataUrl = await fetchImageAsDataUrl(media_url);
+      const caption = isPlaceholder(message_content) ? "" : message_content;
+      effectiveMessage = caption
+        ? `[O cliente enviou uma imagem com a legenda]: ${caption}`
+        : "[O cliente enviou uma imagem]";
+    }
+
     // Gather enriched context
     const context = await gatherContext(supabase, phone_number, effectiveMessage);
 
@@ -101,6 +115,30 @@ serve(async (req: Request) => {
     if (isAudioMessage && chatHistory.length > 0) {
       const lastIdx = chatHistory.length - 1;
       if (chatHistory[lastIdx].role === "user") {
+        chatHistory[lastIdx].content = effectiveMessage;
+      } else {
+        chatHistory.push({ role: "user", content: effectiveMessage });
+      }
+    }
+
+    // Inject the image as a multimodal message so the model can actually see it.
+    // The inbound image row is usually filtered out of chatHistory (placeholder/filename),
+    // so we attach it to the last user turn or append a fresh one.
+    if (isImageMessage && imageDataUrl) {
+      const visionContent = [
+        { type: "text", text: effectiveMessage },
+        { type: "image_url", image_url: { url: imageDataUrl } },
+      ];
+      const lastIdx = chatHistory.length - 1;
+      if (lastIdx >= 0 && chatHistory[lastIdx].role === "user") {
+        chatHistory[lastIdx].content = visionContent as any;
+      } else {
+        chatHistory.push({ role: "user", content: visionContent as any });
+      }
+    } else if (isImageMessage && !imageDataUrl) {
+      // Falha ao baixar a imagem: ainda assim avisa o modelo em texto
+      const lastIdx = chatHistory.length - 1;
+      if (lastIdx >= 0 && chatHistory[lastIdx].role === "user") {
         chatHistory[lastIdx].content = effectiveMessage;
       } else {
         chatHistory.push({ role: "user", content: effectiveMessage });
@@ -396,6 +434,20 @@ async function gatherContext(supabase: any, phone: string, message: string) {
     recentServices = servicesResult.data || [];
   }
 
+  // ─── Orçamento pendente mais recente da empresa ────────────────
+  let pendingOrcamento: any = null;
+  if (companyId) {
+    const { data: orc } = await supabase
+      .from("orcamentos")
+      .select("id, numero, valor_total, validade, status")
+      .eq("company_id", companyId)
+      .eq("status", "pendente")
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    pendingOrcamento = orc || null;
+  }
+
   // ─── Gather today's agenda (global, not company-specific) ──────
   const todayStr = new Date().toISOString().split("T")[0];
   let todayAgenda: any[] = [];
@@ -433,7 +485,7 @@ async function gatherContext(supabase: any, phone: string, message: string) {
     console.error("Error fetching today's agenda:", e);
   }
 
-  return { articles: allArticles, contact, openTickets, visits, assets, recentServices, companyId, assetFromTag, assetTicketHistory, todayAgenda };
+  return { articles: allArticles, contact, openTickets, visits, assets, recentServices, companyId, assetFromTag, assetTicketHistory, todayAgenda, pendingOrcamento };
 }
 
 // ─── System Prompt (Enhanced) ────────────────────────────────────────
@@ -642,6 +694,28 @@ REGRAS DURAS:
 - NUNCA crie chamado, agendamento, vínculo ou cadastro sem confirmação explícita do cliente.
 - NUNCA escreva JSON no texto. Use exclusivamente tool_calls estruturado.
 - Use o nome "${contactName}" como solicitante ao criar chamados.
+
+═══════════════════════════════════════
+🖼️ IMAGENS ENVIADAS PELO CLIENTE:
+═══════════════════════════════════════
+Quando o cliente enviar uma FOTO (tela de erro, equipamento, cabo, etiqueta de patrimônio, número de série), ANALISE a imagem e:
+- Descreva o que vê de forma útil e diagnostique o problema quando possível.
+- Se for uma mensagem/código de erro, leia o texto da tela e explique.
+- Se ajudar a resolver, busque na base de conhecimento (search_knowledge_base) com base no que viu.
+- Se for um problema que exige atendimento, ofereça abrir chamado (com confirmação) já descrevendo o que a foto mostra.
+- Nunca invente o que não dá pra ver. Se a imagem estiver ruim/cortada, peça uma nova foto.
+
+═══════════════════════════════════════
+🧾 ORÇAMENTOS:
+═══════════════════════════════════════
+${context.pendingOrcamento
+  ? `⚠️ Este cliente tem um ORÇAMENTO PENDENTE: #${context.pendingOrcamento.numero}, total R$ ${Number(context.pendingOrcamento.valor_total || 0).toFixed(2)}, válido até ${context.pendingOrcamento.validade || "—"}.`
+  : "Nenhum orçamento pendente para este cliente."}
+
+- Se HÁ orçamento pendente e o cliente APROVA (ex.: "1", "aprovo", "aprovado", "pode fechar", "fechado", "aceito") → chame responder_orcamento com decisao="aprovado". Depois confirme: "Orçamento aprovado! O técnico já foi avisado e dará sequência."
+- Se HÁ orçamento pendente e o cliente RECUSA (ex.: "2", "não", "muito caro", "não quero") → chame responder_orcamento com decisao="recusado" (capture o motivo em observacao, se houver).
+- Se o cliente PEDE preço/cotação/orçamento de um serviço ou produto → NUNCA invente valores. Chame solicitar_orcamento com um resumo do que ele quer, e diga: "Já registrei seu pedido e o técnico vai preparar o orçamento e te enviar."
+- NÃO use responder_orcamento se não houver orçamento pendente.
 
 ═══════════════════════════════════════
 💰 CHAVE PIX / CNPJ (DADO SENSÍVEL):
@@ -930,6 +1004,38 @@ function getTools() {
         },
       },
     },
+    {
+      type: "function",
+      function: {
+        name: "responder_orcamento",
+        description: "Registra a decisão do cliente sobre um orçamento PENDENTE. Use SOMENTE quando há orçamento pendente e o cliente aprova (ex.: '1', 'aprovo', 'aprovado', 'pode fechar') ou recusa (ex.: '2', 'não', 'muito caro', 'recusar').",
+        parameters: {
+          type: "object",
+          properties: {
+            decisao: { type: "string", enum: ["aprovado", "recusado"], description: "Decisão do cliente sobre o orçamento" },
+            orcamento_numero: { type: "number", description: "Número do orçamento (opcional; se omitido usa o pendente mais recente da empresa)" },
+            observacao: { type: "string", description: "Observação do cliente, ex.: motivo da recusa (opcional)" },
+          },
+          required: ["decisao"],
+          additionalProperties: false,
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "solicitar_orcamento",
+        description: "Registra um PEDIDO de cotação/orçamento do cliente e notifica o técnico para preparar. Use quando o cliente pede preço/cotação/orçamento de serviço ou produto. NUNCA invente preços — apenas registre o pedido.",
+        parameters: {
+          type: "object",
+          properties: {
+            resumo: { type: "string", description: "Resumo do que o cliente quer orçar (serviço/produto, equipamento, contexto relevante)" },
+          },
+          required: ["resumo"],
+          additionalProperties: false,
+        },
+      },
+    },
   ];
 }
 
@@ -1106,25 +1212,57 @@ async function handleToolCalls(supabase: any, toolCalls: any[], phone: string, c
       }
 
       case "search_knowledge_base": {
-        const searchTerms = args.query.toLowerCase().split(/\s+/).filter((w: string) => w.length > 2);
-        const orConditions = searchTerms
-          .map((t: string) => `problema.ilike.%${t}%,solucao.ilike.%${t}%,titulo.ilike.%${t}%`)
-          .join(",");
+        let articles: any[] = [];
 
-        const { data: articles } = await supabase
-          .from("knowledge_articles")
-          .select("titulo, problema, solucao, categoria, tags")
-          .or(orConditions)
-          .order("util_count", { ascending: false })
-          .limit(5);
+        // 1) Busca semântica (embedding da pergunta → similaridade por cosseno)
+        try {
+          const OPENAI_API_KEY = Deno.env.get("OPENAI_API_KEY");
+          if (OPENAI_API_KEY) {
+            const embResp = await fetch("https://api.openai.com/v1/embeddings", {
+              method: "POST",
+              headers: { Authorization: `Bearer ${OPENAI_API_KEY}`, "Content-Type": "application/json" },
+              body: JSON.stringify({ model: "text-embedding-3-small", input: args.query }),
+            });
+            if (embResp.ok) {
+              const embJson = await embResp.json();
+              const queryEmbedding = embJson.data[0].embedding;
+              const { data: matches, error: matchErr } = await supabase.rpc("match_knowledge_articles", {
+                query_embedding: queryEmbedding,
+                match_count: 5,
+                match_threshold: 0.2,
+              });
+              if (!matchErr && matches?.length) articles = matches;
+            }
+          }
+        } catch (e: any) {
+          console.error("Busca semântica falhou, caindo para keyword:", e.message);
+        }
+
+        // 2) Fallback: busca por palavra-chave (ilike)
+        if (!articles.length) {
+          const searchTerms = args.query.toLowerCase().split(/\s+/).filter((w: string) => w.length > 2);
+          if (searchTerms.length) {
+            const orConditions = searchTerms
+              .map((t: string) => `problema.ilike.%${t}%,solucao.ilike.%${t}%,titulo.ilike.%${t}%`)
+              .join(",");
+            const { data: kw } = await supabase
+              .from("knowledge_articles")
+              .select("titulo, problema, solucao, categoria, tags")
+              .or(orConditions)
+              .order("util_count", { ascending: false })
+              .limit(5);
+            articles = kw || [];
+          }
+        }
 
         result = {
-          found: (articles || []).length,
-          articles: (articles || []).map((a: any) => ({
+          found: articles.length,
+          articles: articles.map((a: any) => ({
             titulo: a.titulo,
             problema: a.problema,
             solucao: a.solucao,
             categoria: a.categoria,
+            ...(a.similarity != null ? { relevancia: Math.round(a.similarity * 100) / 100 } : {}),
           })),
         };
         break;
@@ -1726,6 +1864,72 @@ async function handleToolCalls(supabase: any, toolCalls: any[], phone: string, c
         break;
       }
 
+      case "responder_orcamento": {
+        const companyId = context.companyId;
+        if (!companyId) {
+          result = { success: false, error: "Cliente sem empresa vinculada — não há orçamento para responder." };
+          break;
+        }
+        let orcQuery = supabase
+          .from("orcamentos")
+          .select("id, numero, valor_total, status")
+          .eq("company_id", companyId);
+        if (args.orcamento_numero) {
+          orcQuery = orcQuery.eq("numero", args.orcamento_numero);
+        } else {
+          orcQuery = orcQuery.eq("status", "pendente");
+        }
+        const { data: orc } = await orcQuery.order("created_at", { ascending: false }).limit(1).maybeSingle();
+        if (!orc) {
+          result = { success: false, error: "Nenhum orçamento pendente encontrado para este cliente." };
+          break;
+        }
+
+        const novoStatus = args.decisao === "aprovado" ? "aprovado" : "recusado";
+        const { error: upErr } = await supabase
+          .from("orcamentos")
+          .update({ status: novoStatus })
+          .eq("id", orc.id);
+        if (upErr) {
+          result = { success: false, error: upErr.message };
+          break;
+        }
+
+        const contactName = context.contact?.contact_name || phone;
+        const companyName = context.contact?.companies?.nome_fantasia || "empresa não identificada";
+        const valor = `R$ ${Number(orc.valor_total || 0).toFixed(2)}`;
+        const emoji = novoStatus === "aprovado" ? "✅" : "❌";
+        await notifyTechnician(
+          `${emoji} *Orçamento ${novoStatus.toUpperCase()}*\n\n` +
+          `🧾 Orçamento #${orc.numero} — ${valor}\n` +
+          `👤 Cliente: ${contactName}\n` +
+          `📞 ${phone}\n` +
+          `🏢 ${companyName}` +
+          (args.observacao ? `\n\n📝 Obs. do cliente: ${args.observacao}` : "") +
+          (novoStatus === "aprovado" ? `\n\n⚡ Dê sequência ao atendimento/OS.` : ""),
+        );
+
+        result = { success: true, orcamento: orc.numero, status: novoStatus };
+        console.log(`Orçamento #${orc.numero} marcado como ${novoStatus} via IA`);
+        break;
+      }
+
+      case "solicitar_orcamento": {
+        const contactName = context.contact?.contact_name || phone;
+        const companyName = context.contact?.companies?.nome_fantasia || "empresa não identificada";
+        await notifyTechnician(
+          `💬 *Pedido de Orçamento*\n\n` +
+          `👤 Cliente: ${contactName}\n` +
+          `📞 ${phone}\n` +
+          `🏢 ${companyName}\n\n` +
+          `📋 Pedido:\n${args.resumo}\n\n` +
+          `⚡ Prepare o orçamento na plataforma e envie ao cliente.`,
+        );
+        result = { success: true, message: "Pedido de orçamento registrado e técnico notificado." };
+        console.log(`Pedido de orçamento registrado para ${phone}`);
+        break;
+      }
+
       default:
         result = { error: "Unknown tool" };
     }
@@ -1738,6 +1942,22 @@ async function handleToolCalls(supabase: any, toolCalls: any[], phone: string, c
   }
 
   return results;
+}
+
+// ─── Notifica o técnico (José) via WhatsApp ──────────────────────────
+async function notifyTechnician(text: string) {
+  try {
+    const MABBIX_URL = Deno.env.get("MABBIX_BACKEND_URL")?.replace("//chat.mabbix.com.br", "//apichat.mabbix.com.br");
+    const MABBIX_TOKEN = Deno.env.get("MABBIX_CONNECTION_TOKEN");
+    if (!MABBIX_URL || !MABBIX_TOKEN) return;
+    await fetch(`${MABBIX_URL}/api/messages/send`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${MABBIX_TOKEN}` },
+      body: JSON.stringify({ number: "5562999522470", body: text, openTicket: "0", queueId: "0" }),
+    });
+  } catch (e) {
+    console.error("notifyTechnician failed:", e);
+  }
 }
 
 // ─── Send & Save Reply via Mabbix ────────────────────────────────────
@@ -1794,6 +2014,27 @@ async function trackFirstResponse(supabase: any, conversationId: string) {
 }
 
 // ─── Audio Transcription via Gemini ──────────────────────────────────
+
+async function fetchImageAsDataUrl(mediaUrl: string): Promise<string | null> {
+  try {
+    const resp = await fetch(mediaUrl);
+    if (!resp.ok) throw new Error(`status ${resp.status}`);
+    const bytes = new Uint8Array(await resp.arrayBuffer());
+    let binary = "";
+    const chunk = 0x8000;
+    for (let i = 0; i < bytes.length; i += chunk) {
+      binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
+    }
+    const base64 = btoa(binary);
+    let ct = resp.headers.get("content-type") || "image/jpeg";
+    if (!ct.startsWith("image/")) ct = "image/jpeg";
+    console.log(`Image downloaded: ${bytes.length} bytes, type: ${ct}`);
+    return `data:${ct};base64,${base64}`;
+  } catch (err) {
+    console.error("Failed to fetch image:", err);
+    return null;
+  }
+}
 
 async function transcribeAudio(mediaUrl: string, apiKey: string): Promise<string> {
   try {
@@ -1862,7 +2103,7 @@ async function transcribeAudio(mediaUrl: string, apiKey: string): Promise<string
   }
 }
 
-// ─── Send Audio Reply via Lovable AI (Google TTS - Free) + Mabbix ────
+// ─── Send Audio Reply via OpenAI (TTS) + Mabbix ────
 
 async function sendAudioReply(
   supabase: any,
@@ -1915,7 +2156,7 @@ async function sendAudioReply(
 
     if (!ttsResponse.ok) {
       const errText = await ttsResponse.text();
-      console.error("Lovable AI TTS error:", ttsResponse.status, errText);
+      console.error("OpenAI TTS error:", ttsResponse.status, errText);
       return;
     }
 
@@ -1929,7 +2170,7 @@ async function sendAudioReply(
       return;
     }
 
-    console.log(`TTS audio generated via Lovable AI`);
+    console.log(`TTS audio generated via OpenAI`);
 
     // Send audio via Mabbix (base64 audio)
     const sendResponse = await fetch(`${mabbixUrl}/api/messages/send`, {

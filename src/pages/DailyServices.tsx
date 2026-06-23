@@ -17,6 +17,8 @@ export default function DailyServices() {
   const [recordDialogOpen, setRecordDialogOpen] = useState(false);
   const [editingRecordId, setEditingRecordId] = useState<string | null>(null);
   const [refreshTrigger, setRefreshTrigger] = useState(0);
+  const [activeTab, setActiveTab] = useState("atendimentos");
+  const [mountedTabs, setMountedTabs] = useState(new Set(["atendimentos"]));
 
   useEffect(() => {
     const recordId = searchParams.get('recordId');
@@ -51,7 +53,10 @@ export default function DailyServices() {
       />
 
       <main className="container mx-auto px-4 py-4">
-        <Tabs defaultValue="atendimentos" className="w-full">
+        <Tabs value={activeTab} onValueChange={(v) => {
+          setActiveTab(v);
+          setMountedTabs(prev => new Set([...prev, v]));
+        }} className="w-full">
           <TabsList>
             <TabsTrigger value="atendimentos">
               <List className="h-4 w-4 mr-2" />
@@ -66,15 +71,21 @@ export default function DailyServices() {
               Relatórios
             </TabsTrigger>
           </TabsList>
-          <TabsContent value="atendimentos" className="mt-4">
-            <DailyServiceRecordList onUpdate={() => setRefreshTrigger(prev => prev + 1)} />
-          </TabsContent>
-          <TabsContent value="agenda" className="mt-4">
-            <DailyServiceCalendar refreshTrigger={refreshTrigger} />
-          </TabsContent>
-          <TabsContent value="relatorios" className="mt-4">
-            <DailyServicesReport />
-          </TabsContent>
+          <div className={activeTab === "atendimentos" ? "mt-4" : "hidden"}>
+            {mountedTabs.has("atendimentos") && (
+              <DailyServiceRecordList onUpdate={() => setRefreshTrigger(prev => prev + 1)} />
+            )}
+          </div>
+          <div className={activeTab === "agenda" ? "mt-4" : "hidden"}>
+            {mountedTabs.has("agenda") && (
+              <DailyServiceCalendar refreshTrigger={refreshTrigger} />
+            )}
+          </div>
+          <div className={activeTab === "relatorios" ? "mt-4" : "hidden"}>
+            {mountedTabs.has("relatorios") && (
+              <DailyServicesReport />
+            )}
+          </div>
         </Tabs>
 
         <DailyServiceRecordDialog

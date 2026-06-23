@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { Input } from "@/components/ui/input";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
@@ -27,9 +27,11 @@ interface ConversationListProps {
   conversations: Conversation[];
   selectedId: string | null;
   onSelect: (conv: Conversation) => void;
+  unreadIds?: Set<string>;
 }
 
-function formatTime(dateStr: string) {
+function formatTime(dateStr: string | null) {
+  if (!dateStr) return "";
   const date = new Date(dateStr);
   if (isToday(date)) return format(date, "HH:mm");
   if (isYesterday(date)) return "Ontem";
@@ -54,31 +56,46 @@ function getQueueLabel(status: string) {
   }
 }
 
-export function ConversationList({ conversations, selectedId, onSelect }: ConversationListProps) {
+// Case- and accent-insensitive text for name matching
+const fold = (s: string) =>
+  s.toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "");
+
+// Cap rendered rows: with thousands of conversations the DOM chokes and the
+// search input lags; past this point the user should refine the search.
+const MAX_RENDERED = 200;
+
+export function ConversationList({ conversations, selectedId, onSelect, unreadIds }: ConversationListProps) {
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState("all");
 
-  const filtered = conversations.filter((c) => {
-    const matchesSearch =
-      !search ||
-      c.contact_name?.toLowerCase().includes(search.toLowerCase()) ||
-      c.phone_number.includes(search);
+  const filtered = useMemo(() => {
+    const q = fold(search.trim());
+    const qDigits = search.replace(/\D/g, "");
 
-    const matchesFilter =
-      filter === "all" ||
-      (filter === "ai" && c.ai_enabled) ||
-      (filter === "waiting" && c.queue_status === "waiting") ||
-      (filter === "assigned" && c.queue_status === "assigned");
+    return conversations.filter((c) => {
+      const matchesSearch =
+        !q ||
+        (c.contact_name && fold(c.contact_name).includes(q)) ||
+        (qDigits.length > 0 && c.phone_number.replace(/\D/g, "").includes(qDigits));
 
-    return matchesSearch && matchesFilter;
-  });
+      const matchesFilter =
+        filter === "all" ||
+        (filter === "ai" && c.ai_enabled) ||
+        (filter === "waiting" && c.queue_status === "waiting") ||
+        (filter === "assigned" && c.queue_status === "assigned");
 
-  const counts = {
+      return matchesSearch && matchesFilter;
+    });
+  }, [conversations, search, filter]);
+
+  const visible = filtered.slice(0, MAX_RENDERED);
+
+  const counts = useMemo(() => ({
     all: conversations.length,
     ai: conversations.filter(c => c.ai_enabled).length,
     waiting: conversations.filter(c => c.queue_status === "waiting").length,
     assigned: conversations.filter(c => c.queue_status === "assigned").length,
-  };
+  }), [conversations]);
 
   const tabs = [
     { key: "all", label: "Todos", icon: Users, count: counts.all },
@@ -137,7 +154,9 @@ export function ConversationList({ conversations, selectedId, onSelect }: Conver
           </div>
         ) : (
           <div>
-            {filtered.map((conv) => (
+            {visible.map((conv) => {
+              const isUnread = unreadIds?.has(conv.id) && selectedId !== conv.id;
+              return (
               <button
                 key={conv.id}
                 onClick={() => onSelect(conv)}
@@ -172,12 +191,17 @@ export function ConversationList({ conversations, selectedId, onSelect }: Conver
                 <div className="flex-1 min-w-0">
                   {/* Name + time */}
                   <div className="flex justify-between items-baseline gap-2">
-                    <p className="font-semibold text-[13px] truncate">
+                    <p className={`text-[13px] truncate ${isUnread ? "font-bold" : "font-semibold"}`}>
                       {conv.contact_name || conv.phone_number}
                     </p>
-                    <span className="text-[10px] text-muted-foreground whitespace-nowrap font-medium">
-                      {formatTime(conv.last_message_at)}
-                    </span>
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      <span className={`text-[10px] whitespace-nowrap font-medium ${isUnread ? "text-emerald-600" : "text-muted-foreground"}`}>
+                        {formatTime(conv.last_message_at)}
+                      </span>
+                      {isUnread && (
+                        <span className="h-2.5 w-2.5 rounded-full bg-emerald-500 shrink-0" title="Nova mensagem" />
+                      )}
+                    </div>
                   </div>
 
                   {/* Phone number */}
@@ -205,7 +229,13 @@ export function ConversationList({ conversations, selectedId, onSelect }: Conver
                   </div>
                 </div>
               </button>
-            ))}
+              );
+            })}
+            {filtered.length > MAX_RENDERED && (
+              <div className="p-3 text-center text-[11px] text-muted-foreground">
+                Mostrando {MAX_RENDERED} de {filtered.length} conversas — refine a busca para ver as demais
+              </div>
+            )}
           </div>
         )}
       </ScrollArea>

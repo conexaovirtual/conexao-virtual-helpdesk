@@ -332,18 +332,18 @@ export function DailyServiceRecordList({ onUpdate }: DailyServiceRecordListProps
                 className="cursor-pointer hover:bg-accent/50 transition-colors"
                 onClick={() => toggleCompany(company.id)}
               >
-                <CardTitle className="flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <Building2 className="h-5 w-5 text-primary" />
-                    <span>{company.name}</span>
-                    <span className="text-sm text-muted-foreground font-normal">
+                <CardTitle className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <Building2 className="h-5 w-5 text-primary shrink-0" />
+                    <span className="truncate">{company.name}</span>
+                    <span className="text-sm text-muted-foreground font-normal shrink-0">
                       ({company.records.length} {company.records.length === 1 ? 'atendimento' : 'atendimentos'})
                     </span>
                   </div>
                   {expandedCompanies.has(company.id) ? (
-                    <ChevronDown className="h-5 w-5" />
+                    <ChevronDown className="h-5 w-5 shrink-0" />
                   ) : (
-                    <ChevronRight className="h-5 w-5" />
+                    <ChevronRight className="h-5 w-5 shrink-0" />
                   )}
                 </CardTitle>
               </CardHeader>

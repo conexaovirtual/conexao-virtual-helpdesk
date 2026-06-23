@@ -1,5 +1,7 @@
 import { useState, useEffect, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { useQuery } from '@tanstack/react-query';
+import { format } from 'date-fns';
 import { useAuth } from '@/hooks/useAuth';
 import { supabase } from '@/integrations/supabase/client';
 import { PageHeader } from '@/components/layout/PageHeader';
@@ -7,6 +9,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Checkbox } from '@/components/ui/checkbox';
+import { Input } from '@/components/ui/input';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { useToast } from '@/hooks/use-toast';
 import { useGeolocation } from '@/hooks/useGeolocation';
@@ -20,6 +23,8 @@ import {
   GripVertical,
   Loader2,
   ExternalLink,
+  CalendarDays,
+  Fuel,
 } from 'lucide-react';
 
 interface CompanyWithLocation {
@@ -160,6 +165,66 @@ export default function RoutePlanner() {
     return total;
   }, [optimizedRoute, position]);
 
+  // Veículo do técnico logado → custo estimado da rota
+  const { data: vehicle } = useQuery({
+    queryKey: ['my-vehicle', profile?.id],
+    queryFn: async () => {
+      const { data } = await supabase
+        .from('technician_vehicles')
+        .select('consumo_km_litro, preco_litro')
+        .eq('tecnico_id', profile!.id)
+        .maybeSingle();
+      return data;
+    },
+    enabled: !!profile,
+  });
+
+  const fuelCost = useMemo(() => {
+    if (!vehicle || totalDistance <= 0) return null;
+    const consumo = Number(vehicle.consumo_km_litro) || 10;
+    const preco = Number(vehicle.preco_litro) || 0;
+    return (totalDistance / consumo) * preco;
+  }, [vehicle, totalDistance]);
+
+  // Carrega as empresas com OS/visita agendada na data e já seleciona na rota
+  const [dayDate, setDayDate] = useState(format(new Date(), 'yyyy-MM-dd'));
+  const [loadingDay, setLoadingDay] = useState(false);
+
+  const loadDayStops = async () => {
+    setLoadingDay(true);
+    const [osRes, visitRes] = await Promise.all([
+      supabase
+        .from('service_orders')
+        .select('company_id')
+        .gte('data_agendada', `${dayDate}T00:00:00`)
+        .lte('data_agendada', `${dayDate}T23:59:59`)
+        .in('status', ['agendada', 'confirmada', 'em_execucao']),
+      supabase
+        .from('visit_schedules')
+        .select('company_id')
+        .eq('proxima_visita', dayDate)
+        .neq('status', 'concluida'),
+    ]);
+    const ids = new Set<string>();
+    (osRes.data || []).forEach((o: any) => o.company_id && ids.add(o.company_id));
+    (visitRes.data || []).forEach((v: any) => v.company_id && ids.add(v.company_id));
+
+    const selectable = companies.filter((c) => ids.has(c.id)).map((c) => c.id);
+    const semGps = ids.size - selectable.length;
+    setSelectedIds(new Set(selectable));
+    setOptimizedRoute(null);
+    setLoadingDay(false);
+
+    if (ids.size === 0) {
+      toast({ title: 'Nada agendado nesse dia', description: 'Sem OS ou visitas para a data.' });
+    } else {
+      toast({
+        title: `${selectable.length} parada(s) do dia carregada(s)`,
+        description: semGps > 0 ? `${semGps} sem GPS não incluída(s).` : 'Clique em Otimizar Rota.',
+      });
+    }
+  };
+
   const openInGoogleMaps = () => {
     if (!optimizedRoute || optimizedRoute.length === 0) return;
     const origin = position
@@ -198,6 +263,32 @@ export default function RoutePlanner() {
           error={geoError}
           onCapture={captureLocation}
         />
+
+        {/* Carregar a agenda do dia automaticamente */}
+        <Card>
+          <CardContent className="pt-6">
+            <div className="flex flex-col sm:flex-row sm:items-end gap-3">
+              <div className="flex-1 min-w-0">
+                <p className="text-sm font-medium flex items-center gap-2 mb-1">
+                  <CalendarDays className="h-4 w-4" /> Paradas do dia
+                </p>
+                <p className="text-xs text-muted-foreground">
+                  Carrega as empresas com OS ou visita agendada na data e seleciona na rota.
+                </p>
+              </div>
+              <Input
+                type="date"
+                value={dayDate}
+                onChange={(e) => setDayDate(e.target.value)}
+                className="sm:w-44"
+              />
+              <Button onClick={loadDayStops} disabled={loadingDay} variant="secondary" className="gap-2">
+                {loadingDay ? <Loader2 className="h-4 w-4 animate-spin" /> : <CalendarDays className="h-4 w-4" />}
+                Carregar
+              </Button>
+            </div>
+          </CardContent>
+        </Card>
 
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
           {/* Lista de empresas */}
@@ -288,6 +379,16 @@ export default function RoutePlanner() {
                       <p className="text-xs text-muted-foreground">
                         Distância total estimada: {totalDistance.toFixed(1)} km
                       </p>
+                      {fuelCost !== null ? (
+                        <p className="text-xs text-green-600 font-medium flex items-center gap-1 mt-0.5">
+                          <Fuel className="h-3 w-3" />
+                          Combustível estimado: {fuelCost.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })}
+                        </p>
+                      ) : (
+                        <p className="text-xs text-muted-foreground mt-0.5">
+                          Configure seu veículo em Deslocamento para ver o custo.
+                        </p>
+                      )}
                     </div>
                     <div className="flex gap-2">
                       <Button size="sm" variant="outline" onClick={openInGoogleMaps} className="gap-1.5">

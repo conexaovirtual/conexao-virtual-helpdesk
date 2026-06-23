@@ -14,7 +14,10 @@ async function sendWhatsApp(phone: string, text: string): Promise<{ ok: boolean;
     return { ok: false, error: "Mabbix não configurado" };
   }
 
-  const MABBIX_BACKEND_URL = rawUrl.replace("chat.mabbix.com.br", "apichat.mabbix.com.br");
+  // Garante o host apichat sem duplicar "api" se o segredo já vier como apichat.*
+  const MABBIX_BACKEND_URL = rawUrl.includes("apichat.mabbix.com.br")
+    ? rawUrl
+    : rawUrl.replace("chat.mabbix.com.br", "apichat.mabbix.com.br");
   const url = `${MABBIX_BACKEND_URL}/api/messages/send`;
   const payload = { number: phone, openTicket: "0", queueId: "0", body: text };
   console.log(`Enviando para Mabbix: ${url}`, JSON.stringify(payload));
@@ -65,7 +68,9 @@ serve(async (req: Request) => {
 
   try {
     const rawMabbixUrl = Deno.env.get("MABBIX_URL") || Deno.env.get("MABBIX_BACKEND_URL");
-    const MABBIX_BACKEND_URL = rawMabbixUrl?.replace("chat.mabbix.com.br", "apichat.mabbix.com.br");
+    const MABBIX_BACKEND_URL = rawMabbixUrl?.includes("apichat.mabbix.com.br")
+      ? rawMabbixUrl
+      : rawMabbixUrl?.replace("chat.mabbix.com.br", "apichat.mabbix.com.br");
     const MABBIX_CONNECTION_TOKEN = Deno.env.get("MABBIX_TOKEN") || Deno.env.get("MABBIX_CONNECTION_TOKEN");
 
     if (!MABBIX_BACKEND_URL || !MABBIX_CONNECTION_TOKEN) {

@@ -90,7 +90,7 @@ serve(async (req) => {
     const today = new Date();
     const todayStr = today.toISOString().split("T")[0];
 
-    // Call Lovable AI with tool calling for structured output
+    // Call OpenAI with tool calling for structured output
     const response = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: {
