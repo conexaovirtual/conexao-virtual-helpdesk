@@ -6,13 +6,11 @@ import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Skeleton } from '@/components/ui/skeleton';
-import { ArrowLeft, Clock, User, Package, AlertCircle, PlayCircle, Calendar as CalendarIcon, Loader2, Receipt } from 'lucide-react';
+import { ArrowLeft, Clock, User, Package, AlertCircle, PlayCircle, Calendar as CalendarIcon, Loader2 } from 'lucide-react';
 import { format } from 'date-fns';
 import { ptBR } from 'date-fns/locale';
 import { TicketTimeline } from '@/components/tickets/TicketTimeline';
-import { TicketComments } from '@/components/tickets/TicketComments';
 import { TicketStatusUpdate } from '@/components/tickets/TicketStatusUpdate';
-import { TicketAssignment } from '@/components/tickets/TicketAssignment';
 import { ServiceOrderDialog } from '@/components/service-orders/ServiceOrderDialog';
 import { FileText } from 'lucide-react';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
@@ -22,9 +20,6 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { Calendar } from '@/components/ui/calendar';
 import { toast } from 'sonner';
-import { AITriageCard } from '@/components/ai/AITriageCard';
-import { AIDiagnosticButton } from '@/components/ai/AIDiagnosticButton';
-import { OrcamentoBomControle } from '@/components/service-orders/OrcamentoBomControle';
 
 export default function TicketDetail() {
   const { id } = useParams();
@@ -33,7 +28,6 @@ export default function TicketDetail() {
   const [ticket, setTicket] = useState<any>(null);
   const [loading, setLoading] = useState(true);
   const [isServiceOrderDialogOpen, setIsServiceOrderDialogOpen] = useState(false);
-  const [isOrcamentoOpen, setIsOrcamentoOpen] = useState(false);
   
   // States for service actions
   const [showActionDialog, setShowActionDialog] = useState(false);
@@ -132,8 +126,9 @@ export default function TicketDetail() {
   }
 
   const canManage = profile?.roles?.some(r => ['admin_provedor', 'tecnico', 'gestor_cliente'].includes(r)) || false;
-  const canViewFinancials = profile?.roles?.some(r => ['admin_provedor', 'gestor_cliente'].includes(r)) || false;
-  const canOpenService = canManage && ['novo', 'triagem'].includes(ticket?.status);
+  // atender/agendar disponível enquanto o chamado estiver aberto (antes só novo/triagem,
+  // o que escondia o botão justamente nos chamados em atendimento)
+  const canOpenService = canManage && !['resolvido', 'fechado', 'cancelado'].includes(ticket?.status);
 
   const handleOpenActionDialog = (type: 'immediate' | 'schedule') => {
     setActionType(type);
@@ -313,28 +308,9 @@ export default function TicketDetail() {
               )}
 
               <TicketTimeline ticketId={ticket.id} />
-              <TicketComments ticketId={ticket.id} />
             </div>
 
             <div className="space-y-4">
-              {/* AI Triage Card for new tickets */}
-              {canManage && ['novo', 'triagem'].includes(ticket?.status) && (
-                <AITriageCard ticket={ticket} onApplySuggestion={loadTicket} />
-              )}
-
-              {/* AI Diagnostic Button for tickets in progress */}
-              {canManage && ticket?.status === 'em_atendimento' && (
-                <AIDiagnosticButton 
-                  contexto={{
-                    ticket_id: ticket.id,
-                    asset_id: ticket.asset_id,
-                    descricao_problema: ticket.descricao
-                  }}
-                  variant="outline"
-                  className="w-full"
-                />
-              )}
-
               {canManage && (
                 <>
                   {/* Card para abrir atendimento ou OS quando ticket está novo/triagem */}
@@ -371,9 +347,8 @@ export default function TicketDetail() {
                   )}
 
                   <TicketStatusUpdate ticket={ticket} onUpdate={loadTicket} />
-                  <TicketAssignment ticket={ticket} onUpdate={loadTicket} />
-                  
-                  {(ticket.status === 'resolvido' || ticket.status === 'fechado') && (
+
+                  {ticket.status !== 'cancelado' && (
                     <Card>
                       <CardHeader>
                         <CardTitle className="text-base">Ordem de Serviço</CardTitle>
@@ -382,29 +357,10 @@ export default function TicketDetail() {
                         <Button
                           onClick={() => setIsServiceOrderDialogOpen(true)}
                           className="w-full"
+                          variant="outline"
                         >
                           <FileText className="h-4 w-4 mr-2" />
                           Gerar OS
-                        </Button>
-                      </CardContent>
-                    </Card>
-                  )}
-
-                  {ticket.status !== 'cancelado' && (
-                    <Card>
-                      <CardHeader>
-                        <CardTitle className="text-base">Orçamento</CardTitle>
-                      </CardHeader>
-                      <CardContent>
-                        <Button
-                          onClick={() => setIsOrcamentoOpen(true)}
-                          className="w-full"
-                          variant={ticket.bomcontrole_orcamento_id ? "outline" : "default"}
-                        >
-                          <Receipt className="h-4 w-4 mr-2" />
-                          {ticket.bomcontrole_orcamento_id
-                            ? `Orçamento #${ticket.bomcontrole_orcamento_id}`
-                            : 'Gerar Orçamento'}
                         </Button>
                       </CardContent>
                     </Card>
@@ -503,20 +459,6 @@ export default function TicketDetail() {
           ticket={ticket}
           onSuccess={loadTicket}
         />
-
-        <OrcamentoBomControle
-          open={isOrcamentoOpen}
-          onOpenChange={setIsOrcamentoOpen}
-          ticketId={ticket.id}
-          serviceOrder={{
-            numero_os: ticket.numero,
-            companies: ticket.companies,
-            bomcontrole_orcamento_id: ticket.bomcontrole_orcamento_id,
-            bomcontrole_orcamento_url: ticket.bomcontrole_orcamento_url,
-            bomcontrole_orcamento_status: ticket.bomcontrole_orcamento_status,
-          }}
-          onSuccess={loadTicket}
-        />
       </div>
 
       {/* Dialog para criar atendimento ou OS */}
@@ -560,7 +502,7 @@ export default function TicketDetail() {
                   </SelectTrigger>
                   <SelectContent>
                     <SelectItem value="visita_tecnica">Visita Técnica</SelectItem>
-                    <SelectItem value="acesso_remoto">Acesso Remoto (DATTO)</SelectItem>
+                    <SelectItem value="acesso_remoto">Acesso Remoto (NexoRMM)</SelectItem>
                     <SelectItem value="whatsapp">WhatsApp</SelectItem>
                     <SelectItem value="ligacao">Ligação</SelectItem>
                   </SelectContent>
