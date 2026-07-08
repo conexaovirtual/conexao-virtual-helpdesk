@@ -238,6 +238,16 @@ export default function TicketDetail() {
     }
   };
 
+  // descrições vindas de automações (NexoRMM etc.) usam **negrito** markdown;
+  // renderiza o negrito de verdade em vez de mostrar os asteriscos
+  const renderRich = (text: string) => {
+    const escaped = (text || '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;');
+    return { __html: escaped.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>') };
+  };
+
   const getSLAStatus = () => {
     if (!ticket.sla_solucao_limite) return null;
     
@@ -292,7 +302,7 @@ export default function TicketDetail() {
                   <CardTitle>Descrição</CardTitle>
                 </CardHeader>
                 <CardContent>
-                  <p className="whitespace-pre-wrap">{ticket.descricao}</p>
+                  <p className="whitespace-pre-wrap" dangerouslySetInnerHTML={renderRich(ticket.descricao)} />
                 </CardContent>
               </Card>
 
@@ -302,7 +312,7 @@ export default function TicketDetail() {
                     <CardTitle>Solução</CardTitle>
                   </CardHeader>
                   <CardContent>
-                    <p className="whitespace-pre-wrap">{ticket.solucao}</p>
+                    <p className="whitespace-pre-wrap" dangerouslySetInnerHTML={renderRich(ticket.solucao)} />
                   </CardContent>
                 </Card>
               )}
