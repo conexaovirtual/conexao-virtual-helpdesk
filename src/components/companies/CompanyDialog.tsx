@@ -278,6 +278,21 @@ export function CompanyDialog({ open, onOpenChange, company, onSuccess }: Compan
 
         if (error) throw error;
 
+        // A localização é travada por trigger no banco (fn_lock_company_geo):
+        // o UPDATE acima descarta lat/lng. O único caminho sancionado para
+        // alterar a geo de uma empresa existente é a RPC set_company_location.
+        const geoMudou =
+          companyLatitude !== (company.latitude ?? null) ||
+          companyLongitude !== (company.longitude ?? null);
+        if (geoMudou) {
+          const { error: geoError } = await supabase.rpc('set_company_location', {
+            p_company_id: company.id,
+            p_lat: companyLatitude,
+            p_lng: companyLongitude,
+          });
+          if (geoError) throw geoError;
+        }
+
         toast({
           title: 'Empresa atualizada',
           description: 'Os dados foram salvos com sucesso.',
@@ -748,7 +763,7 @@ export function CompanyDialog({ open, onOpenChange, company, onSuccess }: Compan
 
 
               <div className="md:col-span-2">
-                <label className="text-sm font-medium">Datto RMM Site ID</label>
+                <label className="text-sm font-medium">NexoRMM Site ID</label>
                 <Input
                   value={dattoSiteId}
                   onChange={(e) => setDattoSiteId(e.target.value)}
@@ -756,7 +771,7 @@ export function CompanyDialog({ open, onOpenChange, company, onSuccess }: Compan
                   className="mt-1.5"
                 />
                 <p className="text-xs text-muted-foreground mt-1">
-                  Vincula esta empresa a um Site específico do Datto RMM para sincronização precisa
+                  Vincula esta empresa a um Site específico do NexoRMM para sincronização precisa
                 </p>
               </div>
 
