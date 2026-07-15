@@ -117,7 +117,7 @@ export default function Inventory() {
                 <SelectTrigger className="h-9 w-full md:w-48"><SelectValue placeholder="Todas origens" /></SelectTrigger>
                 <SelectContent>
                   <SelectItem value="all">Todas origens</SelectItem>
-                  <SelectItem value="datto">☁️ Datto</SelectItem>
+                  <SelectItem value="datto">☁️ NexoRMM</SelectItem>
                   <SelectItem value="manual">✋ Manual</SelectItem>
                 </SelectContent>
               </Select>

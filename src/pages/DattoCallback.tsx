@@ -6,7 +6,7 @@ const CALLBACK_RESULT_KEY = 'datto_oauth_result';
 
 export default function DattoCallback() {
   const [state, setState] = useState<CallbackState>('processing');
-  const [message, setMessage] = useState('Processando autorização do Datto RMM...');
+  const [message, setMessage] = useState('Processando autorização do NexoRMM...');
   const [details, setDetails] = useState<string | null>(null);
 
   useEffect(() => {
@@ -28,7 +28,7 @@ export default function DattoCallback() {
       localStorage.setItem(CALLBACK_RESULT_KEY, JSON.stringify(payload));
       window.opener?.postMessage(payload, '*');
       setState('error');
-      setMessage('A autorização foi recusada ou falhou no Datto RMM.');
+      setMessage('A autorização foi recusada ou falhou no NexoRMM.');
       setDetails(errorDescription || error);
       return;
     }
@@ -44,7 +44,7 @@ export default function DattoCallback() {
     }
 
     setState('error');
-    setMessage('Não foi possível concluir a autorização do Datto RMM.');
+    setMessage('Não foi possível concluir a autorização do NexoRMM.');
     setDetails('O retorno não trouxe código de autorização.');
   }, []);
 

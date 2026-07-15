@@ -1,4 +1,5 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { sendWabaText } from "../_shared/waba-provider.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -367,12 +368,32 @@ Deno.serve(async (req) => {
 
     const { data: assets, error: assetsError } = await supabase
       .from("assets")
-      .select("id, datto_device_uid, datto_device_id, datto_status")
+      .select("id, nome, tipo, datto_device_uid, datto_device_id, datto_status, datto_offline_alerted_at, companies!inner(nome_fantasia, status)")
+      .eq("tipo", "servidor")
+      .eq("companies.status", true)
       .or("datto_device_id.not.is.null,datto_device_uid.not.is.null");
 
     if (assetsError) throw assetsError;
 
-    const now = new Date().toISOString();
+    const alertPhone = "5562999522470";
+
+    async function sendOfflineAlert(asset: { nome: string; tipo: string; companies: { nome_fantasia: string } | null }, isReminder = false) {
+      const empresa = asset.companies?.nome_fantasia || "cliente desconhecido";
+      const tipo = asset.tipo === "servidor" ? "Servidor" : asset.tipo === "desktop" ? "PC" : asset.tipo || "Dispositivo";
+      const msg = isReminder
+        ? `🔴 *DISPOSITIVO AINDA OFFLINE*\n\n🏢 Cliente: ${empresa}\n💻 Dispositivo: ${asset.nome}\n🕐 ${new Date().toLocaleString("pt-BR", { timeZone: "America/Sao_Paulo" })}\n\n_Este dispositivo permanece offline. Verifique imediatamente._`
+        : `⚠️ *ALERTA MONITORAMENTO*\n\n*${tipo} offline detectado!*\n\n🏢 Cliente: ${empresa}\n💻 Dispositivo: ${asset.nome}\n🕐 ${new Date().toLocaleString("pt-BR", { timeZone: "America/Sao_Paulo" })}\n\n_Detectado automaticamente pelo monitoramento Datto._`;
+      try {
+        const result = await sendWabaText(alertPhone, msg, { openTicket: false });
+        console.log(`[Datto] Alerta WhatsApp ${isReminder ? "lembrete" : "inicial"} enviado para ${asset.nome}: ok=${result.ok}`);
+      } catch (e) {
+        console.error("[Datto] Falha ao enviar alerta WhatsApp:", e);
+      }
+    }
+
+    const now = new Date();
+    const nowIso = now.toISOString();
+    const twoHoursAgo = new Date(now.getTime() - 2 * 60 * 60 * 1000).toISOString();
     let onlineCount = 0;
     let offlineCount = 0;
     let unmatchedCount = 0;
@@ -399,10 +420,16 @@ Deno.serve(async (req) => {
       if (isOnline === undefined) {
         unmatchedCount++;
         offlineCount++;
-        await supabase
-          .from("assets")
-          .update({ datto_status: "offline", datto_last_sync: now })
-          .eq("id", asset.id);
+        const shouldAlert = asset.datto_status === "online" ||
+          !asset.datto_offline_alerted_at ||
+          asset.datto_offline_alerted_at < twoHoursAgo;
+        if (shouldAlert) {
+          const isReminder = asset.datto_status === "offline";
+          await sendOfflineAlert(asset as any, isReminder);
+          await supabase.from("assets").update({ datto_status: "offline", datto_last_sync: nowIso, datto_offline_alerted_at: nowIso }).eq("id", asset.id);
+        } else {
+          await supabase.from("assets").update({ datto_status: "offline", datto_last_sync: nowIso }).eq("id", asset.id);
+        }
         continue;
       }
 
@@ -410,10 +437,25 @@ Deno.serve(async (req) => {
       if (isOnline) onlineCount++;
       else offlineCount++;
 
-      await supabase
-        .from("assets")
-        .update({ datto_status: newStatus, datto_last_sync: now })
-        .eq("id", asset.id);
+      if (newStatus === "offline") {
+        const isTransition = asset.datto_status === "online";
+        const needsReminder = !isTransition && (
+          !asset.datto_offline_alerted_at ||
+          asset.datto_offline_alerted_at < twoHoursAgo
+        );
+        if (isTransition || needsReminder) {
+          await sendOfflineAlert(asset as any, !isTransition);
+          await supabase.from("assets").update({ datto_status: newStatus, datto_last_sync: nowIso, datto_offline_alerted_at: nowIso }).eq("id", asset.id);
+        } else {
+          await supabase.from("assets").update({ datto_status: newStatus, datto_last_sync: nowIso }).eq("id", asset.id);
+        }
+      } else {
+        // Voltou online: limpar o controle de alerta
+        if (asset.datto_status === "offline") {
+          console.log(`[Datto] ${asset.nome} voltou online.`);
+        }
+        await supabase.from("assets").update({ datto_status: newStatus, datto_last_sync: nowIso, datto_offline_alerted_at: null }).eq("id", asset.id);
+      }
     }
 
     return new Response(

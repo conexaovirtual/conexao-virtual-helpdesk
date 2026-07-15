@@ -129,7 +129,7 @@ export function RemoteServiceQuickDialog({
         descricao: data.descricao,
         canal: 'acesso_remoto' as const,
         status: 'em_andamento',
-        data_atendimento: new Date().toISOString().split('T')[0],
+        data_atendimento: new Date().toLocaleDateString('en-CA'), // data local (BRT), não UTC
         hora_inicio: data.hora_inicio,
         latitude_inicio: gpsInicio?.latitude || null,
         longitude_inicio: gpsInicio?.longitude || null,
@@ -284,7 +284,7 @@ export function RemoteServiceQuickDialog({
             <div className="flex items-center gap-2 p-3 rounded-lg bg-purple-50 dark:bg-purple-950/30 border border-purple-200 dark:border-purple-800">
               <Monitor className="h-4 w-4 text-purple-600 dark:text-purple-400" />
               <span className="text-sm text-purple-700 dark:text-purple-300">
-                Canal: Acesso Remoto (DATTO)
+                Canal: Acesso Remoto (NexoRMM)
               </span>
             </div>
 

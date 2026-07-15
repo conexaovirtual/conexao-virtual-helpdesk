@@ -296,12 +296,12 @@ export function AssetDialog({ open, onOpenChange, asset, preSelectedCompanyId, o
         </DialogHeader>
         {!asset?.datto_device_uid && !asset?.datto_device_id && asset && (
           <div className="bg-muted/50 border rounded-md p-3 text-sm text-muted-foreground flex items-center gap-2">
-            ✋ <span>Este é um <strong>ativo manual</strong> — não será afetado pela sincronização com o Datto.</span>
+            ✋ <span>Este é um <strong>ativo manual</strong> — não será afetado pela sincronização com o NexoRMM.</span>
           </div>
         )}
         {!asset && (
           <div className="bg-info/10 border border-info/20 rounded-md p-3 text-sm text-muted-foreground flex items-center gap-2">
-            ℹ️ <span>Ativos criados manualmente <strong>não serão deletados</strong> durante a sincronização com o Datto.</span>
+            ℹ️ <span>Ativos criados manualmente <strong>não serão deletados</strong> durante a sincronização com o NexoRMM.</span>
           </div>
         )}
         <form onSubmit={handleSubmit} className="space-y-4">
@@ -315,7 +315,7 @@ export function AssetDialog({ open, onOpenChange, asset, preSelectedCompanyId, o
               
               <TabsTrigger value="datto">
                 <Link2 className="h-3 w-3 mr-1" />
-                Datto
+                NexoRMM
               </TabsTrigger>
               {asset && <TabsTrigger value="cmdb"><Network className="h-3 w-3 mr-1" />CMDB</TabsTrigger>}
               {asset && <TabsTrigger value="changelog"><History className="h-3 w-3 mr-1" />Histórico</TabsTrigger>}
@@ -640,10 +640,10 @@ export function AssetDialog({ open, onOpenChange, asset, preSelectedCompanyId, o
               <div className="p-4 border rounded-lg space-y-4">
                 <h3 className="font-semibold flex items-center gap-2">
                   <Link2 className="h-4 w-4" />
-                  Integração Datto RMM
+                  Integração NexoRMM
                 </h3>
                 <p className="text-sm text-muted-foreground">
-                  Vincule este ativo a um dispositivo monitorado pelo Datto RMM para receber alertas automáticos.
+                  Vincule este ativo a um dispositivo monitorado pelo NexoRMM para receber alertas automáticos.
                 </p>
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                   <div className="space-y-2">
@@ -651,7 +651,7 @@ export function AssetDialog({ open, onOpenChange, asset, preSelectedCompanyId, o
                     <Input
                       value={formData.datto_device_id}
                       onChange={(e) => setFormData({ ...formData, datto_device_id: e.target.value })}
-                      placeholder="ID do dispositivo no Datto"
+                      placeholder="ID do dispositivo no NexoRMM"
                     />
                   </div>
                   <div className="space-y-2">
@@ -659,7 +659,7 @@ export function AssetDialog({ open, onOpenChange, asset, preSelectedCompanyId, o
                     <Input
                       value={formData.datto_site_id}
                       onChange={(e) => setFormData({ ...formData, datto_site_id: e.target.value })}
-                      placeholder="ID do site/cliente no Datto"
+                      placeholder="ID do site/cliente no NexoRMM"
                     />
                   </div>
                 </div>

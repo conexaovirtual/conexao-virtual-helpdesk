@@ -65,7 +65,7 @@ export function useDattoRealtime() {
         const isCritical = ["critical", "high"].includes(alert.alert_priority?.toLowerCase());
 
         if (isCritical) {
-          toast("📡 Alerta Datto RMM", {
+          toast("📡 Alerta NexoRMM", {
             description: `${alert.alert_type || "Alerta"}: ${(alert.alert_message || "").substring(0, 80)}`,
             duration: 8000,
             action: {

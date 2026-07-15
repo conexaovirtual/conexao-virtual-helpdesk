@@ -123,7 +123,7 @@ export function AssetList({ onEdit, refreshTrigger }: AssetListProps) {
           </SelectTrigger>
           <SelectContent>
             <SelectItem value="all">Todas origens</SelectItem>
-            <SelectItem value="datto">☁️ Datto</SelectItem>
+            <SelectItem value="datto">☁️ NexoRMM</SelectItem>
             <SelectItem value="manual">✋ Manual</SelectItem>
           </SelectContent>
         </Select>
