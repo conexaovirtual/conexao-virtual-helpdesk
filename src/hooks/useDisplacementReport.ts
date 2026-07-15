@@ -8,11 +8,30 @@
  * O custo vem da config de veículo do técnico (km/L e R$/L). O tempo de trânsito
  * é estimado pela distância e velocidade média; o tempo de atendimento é real
  * (hora_fim − hora_inicio).
+ *
+ * Além das visitas a clientes, o roteiro inclui as PARADAS avulsas
+ * (displacement_stops): locais que não são clientes mas geram deslocamento
+ * (deixar/buscar equipamento em assistência, comprar peça...). Elas entram no
+ * encadeamento do dia pela ordem de horário, somando km/custo, mas não contam
+ * como tempo de atendimento.
  */
 import { useQuery } from "@tanstack/react-query";
 import { supabase } from "@/integrations/supabase/client";
 
 const ROAD_FACTOR = 1.3; // linha reta → estrada (aproximação)
+
+// Rótulos/ícones dos tipos de parada avulsa
+export const STOP_TYPES: Record<string, { label: string; emoji: string }> = {
+  deixar_manutencao: { label: "Deixar p/ manutenção", emoji: "🔧" },
+  buscar_manutencao: { label: "Buscar/retirar", emoji: "📦" },
+  compra_equipamento: { label: "Compra de equipamento", emoji: "🛒" },
+  outro: { label: "Outro", emoji: "📍" },
+};
+
+function stopDisplayName(s: { tipo: string | null; nome: string | null }): string {
+  const t = STOP_TYPES[s.tipo || "outro"] || STOP_TYPES.outro;
+  return `${t.emoji} ${s.nome?.trim() || t.label}`;
+}
 
 // Distância em km entre duas coordenadas (Haversine)
 function haversine(lat1: number, lon1: number, lat2: number, lon2: number): number {
@@ -49,10 +68,13 @@ const DEFAULT_VEHICLE: VehicleConfig = {
   base_longitude: null,
 };
 
+export type LegKind = "visita" | "parada" | "casa";
+
 export interface DisplacementLeg {
   fromName: string;
   toName: string;
   km: number;
+  toKind: LegKind; // o que é o DESTINO do trecho (p/ a UI marcar paradas)
 }
 
 export interface DayDisplacement {
@@ -60,12 +82,13 @@ export interface DayDisplacement {
   tecnicoId: string;
   tecnicoNome: string;
   atendimentos: number;
+  paradas: number;
   km: number;
   custoCombustivel: number;
   tempoAtendimentoMin: number;
   tempoTransitoMin: number;
   legs: DisplacementLeg[];
-  semGps: number; // atendimentos do dia sem GPS (não entram no cálculo de trecho)
+  semGps: number; // visitas do dia sem GPS (não entram no cálculo de trecho)
 }
 
 export interface TecnicoTotals {
@@ -76,6 +99,7 @@ export interface TecnicoTotals {
   tempoAtendimentoMin: number;
   tempoTransitoMin: number;
   atendimentos: number;
+  paradas: number;
   dias: number;
 }
 
@@ -88,6 +112,7 @@ export interface DisplacementReport {
     tempoAtendimentoMin: number;
     tempoTransitoMin: number;
     atendimentos: number;
+    paradas: number;
     dias: number;
     atendimentosSemGps: number;
   };
@@ -104,6 +129,25 @@ interface RawRecord {
   company_id: string | null;
   canal: string | null;
   companies: { nome_fantasia: string | null; latitude: number | null; longitude: number | null } | null;
+}
+
+interface RawStop {
+  id: string;
+  data: string;
+  hora: string | null;
+  tipo: string | null;
+  nome: string | null;
+  latitude: number | null;
+  longitude: number | null;
+  tecnico_id: string | null;
+}
+
+// Nó do roteiro do dia (visita a cliente OU parada avulsa)
+interface RouteNode {
+  time: number | null;
+  loc: { lat: number; lon: number } | null;
+  name: string;
+  kind: "visita" | "parada";
 }
 
 // Localização da visita: prioriza o GPS da empresa (confiável) e cai no GPS
@@ -159,42 +203,62 @@ export function useDisplacementReport(params: {
       const { data: records, error } = await q;
       if (error) throw error;
 
-      // 3) Nomes dos técnicos
-      const tecIds = Array.from(new Set((records || []).map((r: any) => r.tecnico_id).filter(Boolean)));
+      // 2b) Paradas avulsas do período
+      let qs = supabase
+        .from("displacement_stops")
+        .select("id, data, hora, tipo, nome, latitude, longitude, tecnico_id")
+        .gte("data", from)
+        .lte("data", to)
+        .not("tecnico_id", "is", null);
+      if (tecnicoId !== "all") qs = qs.eq("tecnico_id", tecnicoId);
+
+      const { data: stops, error: stopsError } = await qs;
+      if (stopsError) throw stopsError;
+
+      // 3) Nomes dos técnicos (de visitas e de paradas)
+      const tecIds = Array.from(
+        new Set(
+          [
+            ...(records || []).map((r: any) => r.tecnico_id),
+            ...(stops || []).map((s: any) => s.tecnico_id),
+          ].filter(Boolean)
+        )
+      );
       const nomeByTec = new Map<string, string>();
       if (tecIds.length) {
         const { data: profs } = await supabase.from("profiles").select("id, nome").in("id", tecIds);
         (profs || []).forEach((p: any) => nomeByTec.set(p.id, p.nome || "Técnico"));
       }
 
-      // 4) Agrupa por técnico + dia
-      const groups = new Map<string, RawRecord[]>();
+      // 4) Agrupa por técnico + dia (visitas e paradas usam a mesma chave)
+      const recGroups = new Map<string, RawRecord[]>();
       (records as RawRecord[] || []).forEach((r) => {
         const key = `${r.tecnico_id}__${r.data_atendimento}`;
-        if (!groups.has(key)) groups.set(key, []);
-        groups.get(key)!.push(r);
+        if (!recGroups.has(key)) recGroups.set(key, []);
+        recGroups.get(key)!.push(r);
+      });
+      const stopGroups = new Map<string, RawStop[]>();
+      (stops as RawStop[] || []).forEach((s) => {
+        const key = `${s.tecnico_id}__${s.data}`;
+        if (!stopGroups.has(key)) stopGroups.set(key, []);
+        stopGroups.get(key)!.push(s);
       });
 
+      const allKeys = new Set<string>([...recGroups.keys(), ...stopGroups.keys()]);
       const days: DayDisplacement[] = [];
 
-      for (const [key, recs] of groups.entries()) {
+      for (const key of allKeys) {
         const [tecId, date] = key.split("__");
         const vehicle = vehicleByTec.get(tecId) || DEFAULT_VEHICLE;
+        const recs = recGroups.get(key) || [];
+        const stopsForDay = stopGroups.get(key) || [];
 
         // Só visitas presenciais geram deslocamento (remoto/ligação/whatsapp não).
-        const visitas = recs
-          .filter((r) => r.canal === "visita_tecnica")
-          .sort((a, b) => {
-            const ma = timeToMinutes(a.hora_inicio);
-            const mb = timeToMinutes(b.hora_inicio);
-            if (ma === null) return 1;
-            if (mb === null) return -1;
-            return ma - mb;
-          });
+        const visitas = recs.filter((r) => r.canal === "visita_tecnica");
 
-        if (visitas.length === 0) continue; // dia só com atendimento remoto — sem deslocamento
+        if (visitas.length === 0 && stopsForDay.length === 0) continue;
 
-        // tempo em atendimento (real) das visitas presenciais
+        // tempo em atendimento (real) e visitas sem GPS
         let tempoAtendimentoMin = 0;
         let semGps = 0;
         visitas.forEach((r) => {
@@ -204,26 +268,42 @@ export function useDisplacementReport(params: {
           if (recordLoc(r) === null) semGps += 1;
         });
 
-        // trechos entre visitas consecutivas, usando o GPS da empresa
+        // Roteiro do dia: visitas + paradas, ordenado por horário (sem hora → fim)
+        const nodes: RouteNode[] = [
+          ...visitas.map<RouteNode>((r) => ({
+            time: timeToMinutes(r.hora_inicio),
+            loc: recordLoc(r),
+            name: r.companies?.nome_fantasia || "Local",
+            kind: "visita",
+          })),
+          ...stopsForDay.map<RouteNode>((s) => ({
+            time: timeToMinutes(s.hora),
+            loc: s.latitude != null && s.longitude != null ? { lat: s.latitude, lon: s.longitude } : null,
+            name: stopDisplayName(s),
+            kind: "parada",
+          })),
+        ].sort((a, b) => {
+          if (a.time === null) return 1;
+          if (b.time === null) return -1;
+          return a.time - b.time;
+        });
+
+        // trechos entre nós consecutivos localizados
         const legs: DisplacementLeg[] = [];
         let km = 0;
-        const located = visitas
-          .map((r) => ({ rec: r, loc: recordLoc(r) }))
-          .filter((x) => x.loc !== null) as { rec: RawRecord; loc: { lat: number; lon: number } }[];
+        const located = nodes.filter((n) => n.loc !== null) as (RouteNode & {
+          loc: { lat: number; lon: number };
+        })[];
         for (let i = 1; i < located.length; i++) {
           const prev = located[i - 1];
           const cur = located[i];
           const legKm = haversine(prev.loc.lat, prev.loc.lon, cur.loc.lat, cur.loc.lon) * ROAD_FACTOR;
-          if (legKm < 0.05) continue; // mesma empresa / mesmo local
+          if (legKm < 0.05) continue; // mesmo local
           km += legKm;
-          legs.push({
-            fromName: prev.rec.companies?.nome_fantasia || "Local",
-            toName: cur.rec.companies?.nome_fantasia || "Local",
-            km: legKm,
-          });
+          legs.push({ fromName: prev.name, toName: cur.name, km: legKm, toKind: cur.kind });
         }
 
-        // Casa → 1ª visita e última visita → Casa (se o técnico tem local de partida)
+        // Casa → 1º nó e último nó → Casa (se o técnico tem local de partida)
         if (vehicle.base_latitude != null && vehicle.base_longitude != null && located.length > 0) {
           const first = located[0];
           const last = located[located.length - 1];
@@ -231,13 +311,13 @@ export function useDisplacementReport(params: {
             haversine(vehicle.base_latitude, vehicle.base_longitude, first.loc.lat, first.loc.lon) * ROAD_FACTOR;
           if (goKm >= 0.05) {
             km += goKm;
-            legs.unshift({ fromName: "🏠 Casa", toName: first.rec.companies?.nome_fantasia || "Local", km: goKm });
+            legs.unshift({ fromName: "🏠 Casa", toName: first.name, km: goKm, toKind: first.kind });
           }
           const backKm =
             haversine(last.loc.lat, last.loc.lon, vehicle.base_latitude, vehicle.base_longitude) * ROAD_FACTOR;
           if (backKm >= 0.05) {
             km += backKm;
-            legs.push({ fromName: last.rec.companies?.nome_fantasia || "Local", toName: "🏠 Casa", km: backKm });
+            legs.push({ fromName: last.name, toName: "🏠 Casa", km: backKm, toKind: "casa" });
           }
         }
 
@@ -249,6 +329,7 @@ export function useDisplacementReport(params: {
           tecnicoId: tecId,
           tecnicoNome: nomeByTec.get(tecId) || "Técnico",
           atendimentos: visitas.length,
+          paradas: stopsForDay.length,
           km,
           custoCombustivel,
           tempoAtendimentoMin,
@@ -273,6 +354,7 @@ export function useDisplacementReport(params: {
             tempoAtendimentoMin: 0,
             tempoTransitoMin: 0,
             atendimentos: 0,
+            paradas: 0,
             dias: 0,
           } as TecnicoTotals);
         t.km += d.km;
@@ -280,6 +362,7 @@ export function useDisplacementReport(params: {
         t.tempoAtendimentoMin += d.tempoAtendimentoMin;
         t.tempoTransitoMin += d.tempoTransitoMin;
         t.atendimentos += d.atendimentos;
+        t.paradas += d.paradas;
         t.dias += 1;
         byTecMap.set(d.tecnicoId, t);
       });
@@ -291,6 +374,7 @@ export function useDisplacementReport(params: {
           acc.tempoAtendimentoMin += d.tempoAtendimentoMin;
           acc.tempoTransitoMin += d.tempoTransitoMin;
           acc.atendimentos += d.atendimentos;
+          acc.paradas += d.paradas;
           acc.atendimentosSemGps += d.semGps;
           return acc;
         },
@@ -300,6 +384,7 @@ export function useDisplacementReport(params: {
           tempoAtendimentoMin: 0,
           tempoTransitoMin: 0,
           atendimentos: 0,
+          paradas: 0,
           dias: days.length,
           atendimentosSemGps: 0,
         }

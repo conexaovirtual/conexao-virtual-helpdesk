@@ -26,7 +26,8 @@ import {
 } from "@/components/ui/dialog";
 import { useToast } from "@/hooks/use-toast";
 import { useGeolocation } from "@/hooks/useGeolocation";
-import { useDisplacementReport } from "@/hooks/useDisplacementReport";
+import { useDisplacementReport, STOP_TYPES } from "@/hooks/useDisplacementReport";
+import { StopDialog, StopRecord } from "@/components/displacement/StopDialog";
 import { format, startOfMonth } from "date-fns";
 import {
   Gauge,
@@ -40,6 +41,10 @@ import {
   CalendarDays,
   Car,
   Home,
+  Package,
+  Plus,
+  Pencil,
+  Trash2,
 } from "lucide-react";
 
 const fmtBRL = (n: number) =>
@@ -297,6 +302,8 @@ export default function Deslocamento() {
   }, [authLoading, profile, canAccess, navigate]);
 
   const { data: tecnicos = [] } = useTecnicos();
+  const { toast } = useToast();
+  const queryClient = useQueryClient();
 
   const today = new Date();
   const [from, setFrom] = useState(format(startOfMonth(today), "yyyy-MM-dd"));
@@ -304,8 +311,61 @@ export default function Deslocamento() {
   const [tecnicoId, setTecnicoId] = useState<string>("all");
   const [configOpen, setConfigOpen] = useState(false);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const [stopOpen, setStopOpen] = useState(false);
+  const [editingStop, setEditingStop] = useState<StopRecord | null>(null);
 
   const { data: report, isLoading } = useDisplacementReport({ from, to, tecnicoId });
+
+  // Paradas avulsas do período (para gerenciar: adicionar/editar/excluir)
+  const { data: stops = [] } = useQuery<StopRecord[]>({
+    queryKey: ["displacement-stops-manage", from, to, tecnicoId],
+    queryFn: async () => {
+      let q = supabase
+        .from("displacement_stops")
+        .select("id, tecnico_id, data, hora, tipo, nome, endereco, latitude, longitude, observacao")
+        .gte("data", from)
+        .lte("data", to)
+        .order("data", { ascending: false })
+        .order("hora", { ascending: true });
+      if (tecnicoId !== "all") q = q.eq("tecnico_id", tecnicoId);
+      const { data, error } = await q;
+      if (error) throw error;
+      return (data as StopRecord[]) || [];
+    },
+  });
+
+  const nomeByTec = useMemo(() => {
+    const m = new Map<string, string>();
+    tecnicos.forEach((tc) => m.set(tc.id, tc.nome));
+    return m;
+  }, [tecnicos]);
+
+  const refreshStops = () => {
+    queryClient.invalidateQueries({ queryKey: ["displacement-report"] });
+    queryClient.invalidateQueries({ queryKey: ["displacement-stops-manage"] });
+  };
+
+  const openNewStop = () => {
+    setEditingStop(null);
+    setStopOpen(true);
+  };
+  const openEditStop = (s: StopRecord) => {
+    setEditingStop(s);
+    setStopOpen(true);
+  };
+  const deleteStop = async (s: StopRecord) => {
+    if (!window.confirm("Excluir esta parada?")) return;
+    const { error } = await supabase.from("displacement_stops").delete().eq("id", s.id);
+    if (error) {
+      toast({ title: "Erro ao excluir", description: error.message, variant: "destructive" });
+      return;
+    }
+    toast({ title: "Parada excluída" });
+    refreshStops();
+  };
+
+  // Técnico-alvo ao adicionar parada: o filtrado, ou o próprio usuário se "todos"
+  const addTecnicoId = tecnicoId !== "all" ? tecnicoId : profile?.id ?? "";
 
   const toggle = (key: string) => {
     const next = new Set(expanded);
@@ -405,6 +465,59 @@ export default function Deslocamento() {
           </Card>
         )}
 
+        {/* Paradas avulsas */}
+        <Card>
+          <CardHeader className="pb-3 flex flex-row items-center justify-between gap-2">
+            <CardTitle className="text-base flex items-center gap-2">
+              <Package className="h-4 w-4" /> Paradas avulsas
+            </CardTitle>
+            <Button size="sm" variant="secondary" className="h-8 gap-1.5" onClick={openNewStop} disabled={!addTecnicoId}>
+              <Plus className="h-3.5 w-3.5" /> Adicionar
+            </Button>
+          </CardHeader>
+          <CardContent>
+            {stops.length === 0 ? (
+              <p className="text-sm text-muted-foreground py-2">
+                Nenhuma parada no período. Use “Adicionar” para registrar locais que não são clientes mas geraram
+                deslocamento (deixar/buscar equipamento, compra de peça…).
+              </p>
+            ) : (
+              <div className="space-y-2">
+                {stops.map((s) => {
+                  const meta = STOP_TYPES[s.tipo] || STOP_TYPES.outro;
+                  return (
+                    <div key={s.id} className="flex items-center gap-2 p-2.5 rounded-lg border min-w-0">
+                      <span className="text-lg shrink-0" aria-hidden>
+                        {meta.emoji}
+                      </span>
+                      <div className="flex-1 min-w-0">
+                        <p className="text-sm font-medium truncate">{s.nome || meta.label}</p>
+                        <p className="text-xs text-muted-foreground truncate">
+                          {fmtDateBR(s.data)}
+                          {s.hora ? ` · ${s.hora.substring(0, 5)}` : ""} · {meta.label}
+                          {tecnicoId === "all" && nomeByTec.get(s.tecnico_id) ? ` · ${nomeByTec.get(s.tecnico_id)}` : ""}
+                          {s.latitude == null || s.longitude == null ? " · ⚠️ sem GPS" : ""}
+                        </p>
+                      </div>
+                      <Button size="icon" variant="ghost" className="h-8 w-8 shrink-0" onClick={() => openEditStop(s)}>
+                        <Pencil className="h-3.5 w-3.5" />
+                      </Button>
+                      <Button
+                        size="icon"
+                        variant="ghost"
+                        className="h-8 w-8 shrink-0 text-destructive"
+                        onClick={() => deleteStop(s)}
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </Button>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </CardContent>
+        </Card>
+
         {/* Detalhamento por dia */}
         <Card>
           <CardHeader className="pb-3">
@@ -446,6 +559,11 @@ export default function Deslocamento() {
                           <span className="hidden sm:inline">{fmtKm(d.km)}</span>
                           <span className="text-green-600 font-medium">{fmtBRL(d.custoCombustivel)}</span>
                           <Badge variant="secondary">{d.atendimentos}</Badge>
+                          {d.paradas > 0 && (
+                            <Badge variant="outline" className="gap-1">
+                              <Package className="h-3 w-3" /> {d.paradas}
+                            </Badge>
+                          )}
                         </div>
                       </button>
 
@@ -514,6 +632,18 @@ export default function Deslocamento() {
       </main>
 
       <VehicleConfigDialog open={configOpen} onOpenChange={setConfigOpen} tecnicos={tecnicos} />
+
+      {addTecnicoId && (
+        <StopDialog
+          open={stopOpen}
+          onOpenChange={setStopOpen}
+          tecnicoId={editingStop?.tecnico_id || addTecnicoId}
+          date={editingStop?.data || to}
+          stop={editingStop}
+          allowDateEdit
+          onSuccess={refreshStops}
+        />
+      )}
     </div>
   );
 }
