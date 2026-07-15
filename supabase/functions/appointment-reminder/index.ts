@@ -1,5 +1,6 @@
 import { serve } from "https://deno.land/std@0.190.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { sendWabaText } from "../_shared/waba-provider.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -7,38 +8,12 @@ const corsHeaders = {
 };
 
 async function sendWhatsApp(phone: string, text: string): Promise<{ ok: boolean; error?: string; status?: number; body?: string }> {
-  const rawUrl = Deno.env.get("MABBIX_URL") || Deno.env.get("MABBIX_BACKEND_URL");
-  const MABBIX_CONNECTION_TOKEN = Deno.env.get("MABBIX_TOKEN") || Deno.env.get("MABBIX_CONNECTION_TOKEN");
-
-  if (!rawUrl || !MABBIX_CONNECTION_TOKEN) {
-    return { ok: false, error: "Mabbix não configurado" };
-  }
-
-  // Garante o host apichat sem duplicar "api" se o segredo já vier como apichat.*
-  const MABBIX_BACKEND_URL = rawUrl.includes("apichat.mabbix.com.br")
-    ? rawUrl
-    : rawUrl.replace("chat.mabbix.com.br", "apichat.mabbix.com.br");
-  const url = `${MABBIX_BACKEND_URL}/api/messages/send`;
-  const payload = { number: phone, openTicket: "0", queueId: "0", body: text };
-  console.log(`Enviando para Mabbix: ${url}`, JSON.stringify(payload));
-
   try {
-    const res = await fetch(url, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${MABBIX_CONNECTION_TOKEN}`,
-      },
-      body: JSON.stringify(payload),
-    });
-
-    const responseText = await res.text();
-    console.log(`Mabbix response status: ${res.status}`, responseText.substring(0, 300));
-
-    if (!res.ok) {
-      return { ok: false, status: res.status, body: responseText };
+    const result = await sendWabaText(phone, text, { openTicket: false });
+    console.log(`WABA response ok=${result.ok}`, JSON.stringify(result.raw).substring(0, 300));
+    if (!result.ok) {
+      return { ok: false, status: 500, body: JSON.stringify(result.raw) };
     }
-
     console.log(`✅ WhatsApp enviado para ${phone}`);
     return { ok: true };
   } catch (err: any) {
@@ -67,18 +42,6 @@ serve(async (req: Request) => {
   }
 
   try {
-    const rawMabbixUrl = Deno.env.get("MABBIX_URL") || Deno.env.get("MABBIX_BACKEND_URL");
-    const MABBIX_BACKEND_URL = rawMabbixUrl?.includes("apichat.mabbix.com.br")
-      ? rawMabbixUrl
-      : rawMabbixUrl?.replace("chat.mabbix.com.br", "apichat.mabbix.com.br");
-    const MABBIX_CONNECTION_TOKEN = Deno.env.get("MABBIX_TOKEN") || Deno.env.get("MABBIX_CONNECTION_TOKEN");
-
-    if (!MABBIX_BACKEND_URL || !MABBIX_CONNECTION_TOKEN) {
-      return new Response(JSON.stringify({ error: "Mabbix não configurado" }), {
-        status: 500, headers: { "Content-Type": "application/json", ...corsHeaders },
-      });
-    }
-
     const supabase = createClient(
       Deno.env.get("SUPABASE_URL")!,
       Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!

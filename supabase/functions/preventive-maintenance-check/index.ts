@@ -1,5 +1,6 @@
 import { serve } from "https://deno.land/std@0.190.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { sendWabaText } from "../_shared/waba-provider.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -17,9 +18,6 @@ serve(async (req: Request) => {
       Deno.env.get("SUPABASE_URL")!,
       Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
     );
-    const MABBIX_URL = Deno.env.get("MABBIX_BACKEND_URL")?.replace("//chat.mabbix.com.br", "//apichat.mabbix.com.br");
-    const MABBIX_TOKEN = Deno.env.get("MABBIX_CONNECTION_TOKEN");
-
     // Janela do mês corrente (BRT ~ UTC-3, mas o corte por mês tolera a diferença)
     const now = new Date();
     const monthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1)).toISOString();
@@ -58,7 +56,7 @@ serve(async (req: Request) => {
     const semVisita = contratos.filter((c: any) => !cobertas.has(c.id));
 
     // Só notifica se houver pendência (mensagem acionável)
-    if (semVisita.length > 0 && MABBIX_URL && MABBIX_TOKEN) {
+    if (semVisita.length > 0) {
       const mesNome = MESES[now.getUTCMonth()];
       const lista = semVisita.map((c: any) => `• ${c.nome_fantasia}`).join("\n");
       const msg =
@@ -66,11 +64,7 @@ serve(async (req: Request) => {
         `${semVisita.length} de ${contratos.length} ainda sem visita este mês:\n\n` +
         `${lista}\n\n` +
         `⚡ Agende as visitas na plataforma.`;
-      await fetch(`${MABBIX_URL}/api/messages/send`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${MABBIX_TOKEN}` },
-        body: JSON.stringify({ number: TECNICO_PHONE, body: msg, openTicket: "0", queueId: "0" }),
-      });
+      await sendWabaText(TECNICO_PHONE, msg, { openTicket: false });
     }
 
     console.log(`Preventiva: ${semVisita.length}/${contratos.length} sem visita este mês`);

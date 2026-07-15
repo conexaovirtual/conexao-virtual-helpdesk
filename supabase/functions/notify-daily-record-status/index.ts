@@ -1,5 +1,6 @@
 import { serve } from "https://deno.land/std@0.190.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { sendWabaText } from "../_shared/waba-provider.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -62,16 +63,6 @@ serve(async (req: Request) => {
       return new Response(
         JSON.stringify({ skipped: true, reason: `No notification for status: ${new_status}` }),
         { headers: { "Content-Type": "application/json", ...corsHeaders } }
-      );
-    }
-
-    const MABBIX_BACKEND_URL = Deno.env.get("MABBIX_BACKEND_URL")?.replace("//chat.mabbix.com.br", "//apichat.mabbix.com.br");
-    const MABBIX_CONNECTION_TOKEN = Deno.env.get("MABBIX_CONNECTION_TOKEN");
-
-    if (!MABBIX_BACKEND_URL || !MABBIX_CONNECTION_TOKEN) {
-      return new Response(
-        JSON.stringify({ error: "Mabbix API not configured" }),
-        { status: 500, headers: { "Content-Type": "application/json", ...corsHeaders } }
       );
     }
 
@@ -222,22 +213,8 @@ serve(async (req: Request) => {
 
     console.log(`Sending daily record notification to ${phone} (status: ${new_status})`);
 
-    const response = await fetch(`${MABBIX_BACKEND_URL}/api/messages/send`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${MABBIX_CONNECTION_TOKEN}`,
-      },
-      body: JSON.stringify({
-        number: phone,
-        openTicket: "0",
-        queueId: "0",
-        body: message,
-      }),
-    });
-
-    const result = await response.json();
-    console.log("Mabbix notification response:", JSON.stringify(result).substring(0, 300));
+    const result = await sendWabaText(phone, message, { openTicket: false });
+    console.log("WABA notification response:", JSON.stringify(result.raw).substring(0, 300));
 
     // Registra no log para deduplicação das próximas chamadas.
     await logNotification(supabase, daily_record_id, new_status, phone);

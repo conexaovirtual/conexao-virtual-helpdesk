@@ -1,5 +1,6 @@
 import { serve } from "https://deno.land/std@0.190.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { sendWabaText } from "../_shared/waba-provider.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -283,11 +284,9 @@ const handler = async (req: Request): Promise<Response> => {
 
     // Enviar WhatsApp de confirmação para o solicitante
     try {
-      const MABBIX_BACKEND_URL = Deno.env.get("MABBIX_BACKEND_URL")?.replace("//chat.mabbix.com.br", "//apichat.mabbix.com.br");
-      const MABBIX_CONNECTION_TOKEN = Deno.env.get("MABBIX_CONNECTION_TOKEN");
       const digits = solicitanteContato.replace(/\D/g, "");
 
-      if (MABBIX_BACKEND_URL && MABBIX_CONNECTION_TOKEN && digits.length >= 10) {
+      if (digits.length >= 10) {
         const phone = digits.startsWith("55") && digits.length >= 12 ? digits : `55${digits}`;
 
         const mensagem =
@@ -301,14 +300,7 @@ const handler = async (req: Request): Promise<Response> => {
           `Nossa equipe técnica já foi notificada e entrará em contato em breve.\n\n` +
           `_Conexão Virtual Soluções Tecnológicas_`;
 
-        await fetch(`${MABBIX_BACKEND_URL}/api/messages/send`, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${MABBIX_CONNECTION_TOKEN}`,
-          },
-          body: JSON.stringify({ number: phone, openTicket: "0", queueId: "0", body: mensagem }),
-        }).catch(e => console.error("WhatsApp confirmation error:", e));
+        await sendWabaText(phone, mensagem, { openTicket: false }).catch(e => console.error("WhatsApp confirmation error:", e));
 
         console.log(`WhatsApp confirmation sent to ${phone} for ticket #${ticketNumero}`);
       }

@@ -1,4 +1,5 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { sendWabaText } from "../_shared/waba-provider.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -66,10 +67,6 @@ Deno.serve(async (req: Request) => {
       Deno.env.get("SUPABASE_URL")!,
       Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
     );
-    const MABBIX_BACKEND_URL = Deno.env.get("MABBIX_BACKEND_URL")
-      ?.replace("//chat.mabbix.com.br", "//apichat.mabbix.com.br");
-    const MABBIX_TOKEN = Deno.env.get("MABBIX_CONNECTION_TOKEN");
-
     const { action, ...params } = await req.json();
 
     // ── LIST ──
@@ -174,18 +171,14 @@ Deno.serve(async (req: Request) => {
         bomcontrole_orcamento_status: "enviado",
       }).eq("id", entityId);
 
-      if (enviar_whatsapp && MABBIX_BACKEND_URL && MABBIX_TOKEN) {
+      if (enviar_whatsapp) {
         const phone = (company.whatsapp || company.telefone || "").replace(/\D/g, "");
         if (phone.length >= 10) {
           const msg =
             `Olá! Segue o orçamento #${bcId} referente ao ${refLabel}.\n\n` +
             (pdfUrl ? `📄 Visualize aqui: ${pdfUrl}\n\n` : "") +
             `Responda 1️⃣ para APROVAR ou 2️⃣ para solicitar revisão.`;
-          fetch(`${MABBIX_BACKEND_URL}/api/messages/send`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json", "Authorization": `Bearer ${MABBIX_TOKEN}` },
-            body: JSON.stringify({ number: phone, openTicket: "0", queueId: "0", body: msg }),
-          }).catch(console.error);
+          sendWabaText(phone, msg, { openTicket: false }).catch(console.error);
         }
       }
 

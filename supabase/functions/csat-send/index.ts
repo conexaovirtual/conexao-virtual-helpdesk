@@ -1,5 +1,6 @@
 import { serve } from "https://deno.land/std@0.190.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { sendWabaText } from "../_shared/waba-provider.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -21,9 +22,6 @@ serve(async (req: Request) => {
       Deno.env.get("SUPABASE_URL")!,
       Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
     );
-    const MABBIX_URL = Deno.env.get("MABBIX_BACKEND_URL")?.replace("//chat.mabbix.com.br", "//apichat.mabbix.com.br");
-    const MABBIX_TOKEN = Deno.env.get("MABBIX_CONNECTION_TOKEN");
-
     const { ticket_id, service_order_id } = await req.json();
     if (!ticket_id && !service_order_id) throw new Error("Informe ticket_id ou service_order_id.");
 
@@ -91,17 +89,11 @@ serve(async (req: Request) => {
     }
 
     // Envia a pesquisa
-    if (MABBIX_URL && MABBIX_TOKEN) {
-      const msg =
-        `Olá! Seu ${refLabel} foi concluído ✅\n\n` +
-        `De *1 a 5*, como você avalia nosso atendimento?\n` +
-        `Responda só com o número (5 = ótimo, 1 = ruim). 🙏`;
-      await fetch(`${MABBIX_URL}/api/messages/send`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${MABBIX_TOKEN}` },
-        body: JSON.stringify({ number: phone, body: msg, openTicket: "0", queueId: "0" }),
-      });
-    }
+    const msg =
+      `Olá! Seu ${refLabel} foi concluído ✅\n\n` +
+      `De *1 a 5*, como você avalia nosso atendimento?\n` +
+      `Responda só com o número (5 = ótimo, 1 = ruim). 🙏`;
+    await sendWabaText(phone, msg, { openTicket: false });
 
     await supabase.from("csat_responses").insert({
       ticket_id: ticket_id || null,

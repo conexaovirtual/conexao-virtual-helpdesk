@@ -1,4 +1,5 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { getWabaProvider } from "../_shared/waba-provider.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -18,14 +19,6 @@ Deno.serve(async (req: Request) => {
       Deno.env.get("SUPABASE_URL")!,
       Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
     );
-
-    // The secret may hold the frontend host (chat.mabbix.com.br); the API lives
-    // at apichat.mabbix.com.br. Rewrite defensively (anchored to "//" so an
-    // already-correct apichat URL is left untouched).
-    const MABBIX_BACKEND_URL = Deno.env.get("MABBIX_BACKEND_URL")
-      ?.replace("//chat.mabbix.com.br", "//apichat.mabbix.com.br");
-    const MABBIX_ADMIN_EMAIL = Deno.env.get("MABBIX_ADMIN_EMAIL");
-    const MABBIX_ADMIN_PASSWORD = Deno.env.get("MABBIX_ADMIN_PASSWORD");
 
     const warnings: string[] = [];
     let contactsImported = 0;
@@ -69,126 +62,200 @@ Deno.serve(async (req: Request) => {
 
     const newConversations: Record<string, unknown>[] = [];
 
-    // --- 1) Import every contact from Mabbix (Whaticket: session login +
-    // paginated GET /contacts; the connection token is not accepted there) ---
-    if (!MABBIX_BACKEND_URL) {
-      warnings.push("Secret MABBIX_BACKEND_URL ausente — importação da Mabbix pulada.");
-    } else if (!MABBIX_ADMIN_EMAIL || !MABBIX_ADMIN_PASSWORD) {
-      warnings.push(
-        "Secrets MABBIX_ADMIN_EMAIL / MABBIX_ADMIN_PASSWORD não configurados — importação da Mabbix pulada."
-      );
-    } else {
-      const loginResp = await fetch(`${MABBIX_BACKEND_URL}/auth/login`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email: MABBIX_ADMIN_EMAIL, password: MABBIX_ADMIN_PASSWORD }),
-      });
-      if (!loginResp.ok) {
-        const errText = (await loginResp.text()).slice(0, 200);
-        throw new Error(`Login na Mabbix falhou (${loginResp.status}): ${errText}`);
-      }
-      const loginData = await loginResp.json();
-      const jwt = loginData?.token;
-      if (!jwt) throw new Error("Login na Mabbix não retornou token de sessão");
+    // --- 1) Import every contact from the active WABA provider. The switch
+    // follows _shared/waba-provider.ts (WABA_PROVIDER env var); both branches
+    // are normalized into the same shape before processing. ---
+    type ProviderContact = {
+      number: string;
+      name: string | null;
+      profilePicUrl: string | null;
+      isGroup: boolean;
+    };
+    const providerContacts: ProviderContact[] = [];
 
-      const mabbixContacts: any[] = [];
-      for (let page = 1; page <= 200; page++) {
+    if (getWabaProvider() === "evolution") {
+      // Evolution API: POST /chat/findContacts/{instance} returns every
+      // contact of the instance in one response (no pagination).
+      const EVOLUTION_API_URL = Deno.env.get("EVOLUTION_API_URL");
+      const EVOLUTION_API_KEY = Deno.env.get("EVOLUTION_API_KEY");
+      const EVOLUTION_INSTANCE = Deno.env.get("EVOLUTION_INSTANCE");
+      if (!EVOLUTION_API_URL || !EVOLUTION_API_KEY || !EVOLUTION_INSTANCE) {
+        warnings.push(
+          "Secrets EVOLUTION_API_URL / EVOLUTION_API_KEY / EVOLUTION_INSTANCE não configurados — importação da Evolution pulada."
+        );
+      } else {
         const resp = await fetch(
-          `${MABBIX_BACKEND_URL}/contacts?searchParam=&pageNumber=${page}`,
-          { headers: { Authorization: `Bearer ${jwt}` } }
+          `${EVOLUTION_API_URL}/chat/findContacts/${EVOLUTION_INSTANCE}`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json", apikey: EVOLUTION_API_KEY },
+            body: JSON.stringify({ where: {} }),
+          }
         );
         if (!resp.ok) {
-          warnings.push(`Falha ao listar contatos (página ${page}): HTTP ${resp.status}`);
-          break;
+          const errText = (await resp.text()).slice(0, 200);
+          throw new Error(`Evolution findContacts falhou (${resp.status}): ${errText}`);
         }
         const data = await resp.json();
-        const batch: any[] = data?.contacts ?? [];
-        mabbixContacts.push(...batch);
-        if (!data?.hasMore || batch.length === 0) break;
-      }
-      console.log(`Mabbix retornou ${mabbixContacts.length} contatos`);
-
-      const contactRows = new Map<string, Record<string, unknown>>();
-      for (const ct of mabbixContacts) {
-        if (ct?.isGroup) {
-          // Groups never become contact rows, but if the webhook already
-          // created a conversation for the group, refresh its name/photo.
-          const gphone = normalize(ct?.number);
-          const gconvo = convoByPhone.get(gphone);
-          if (gconvo) {
-            const gupdates: Record<string, unknown> = {};
-            if (ct?.name && (!gconvo.contact_name || gconvo.contact_name === gconvo.phone_number)) {
-              gupdates.contact_name = ct.name;
-              namesUpdated++;
-            }
-            if (ct?.profilePicUrl && gconvo.profile_photo_url !== ct.profilePicUrl) {
-              gupdates.profile_photo_url = ct.profilePicUrl;
-              photosUpdated++;
-            }
-            if (Object.keys(gupdates).length > 0) {
-              await supabase.from("waba_conversations").update(gupdates).eq("id", gconvo.id);
-            }
-          }
-          continue;
-        }
-
-        const phone = normalize(ct?.number);
-        if (phone.length < 10) continue;
-        const name = String(ct?.name ?? "").trim() || null;
-        const photo = ct?.profilePicUrl || null;
-        const company = companyByPhone.get(phone);
-        if (company) companiesLinked++;
-
-        contactRows.set(phone, {
-          phone_number: phone,
-          contact_name: name,
-          company_id: company?.id ?? null,
-        });
-
-        const convo = convoByPhone.get(phone);
-        if (!convo) {
-          const row = {
-            phone_number: phone,
-            contact_name: name || company?.nome_fantasia || "Contato",
-            profile_photo_url: photo,
-            status: "active",
-            queue_status: "resolved",
-            ai_enabled: true,
-          };
-          newConversations.push(row);
-          convoByPhone.set(phone, {
-            id: "",
-            phone_number: phone,
-            contact_name: row.contact_name as string,
-            profile_photo_url: photo,
+        const list: any[] = Array.isArray(data) ? data : data?.contacts ?? [];
+        for (const ct of list) {
+          // v2 exposes the WhatsApp JID as remoteJid; v1 used id.
+          const jid = String(ct?.remoteJid ?? ct?.id ?? "");
+          const isGroup = jid.endsWith("@g.us");
+          // Anything else (@lid, @broadcast, status@broadcast) carries no
+          // dialable phone number — skip.
+          if (!isGroup && !jid.endsWith("@s.whatsapp.net")) continue;
+          providerContacts.push({
+            number: jid.split("@")[0],
+            name: String(ct?.pushName ?? "").trim() || null,
+            profilePicUrl: ct?.profilePicUrl || ct?.profilePictureUrl || null,
+            isGroup,
           });
-        } else {
-          const updates: Record<string, unknown> = {};
-          if (name && (!convo.contact_name || convo.contact_name === convo.phone_number)) {
-            updates.contact_name = name;
+        }
+        console.log(
+          `Evolution retornou ${list.length} contatos (${providerContacts.length} utilizáveis)`
+        );
+      }
+    } else {
+      // ---- Mabbix (Whaticket): session login + paginated GET /contacts; the
+      // connection token is not accepted there. Kept as-is until the Mabbix
+      // contract is cancelled. ----
+      // The secret may hold the frontend host (chat.mabbix.com.br); the API
+      // lives at apichat.mabbix.com.br. Rewrite defensively (anchored to "//"
+      // so an already-correct apichat URL is left untouched).
+      const MABBIX_BACKEND_URL = Deno.env.get("MABBIX_BACKEND_URL")
+        ?.replace("//chat.mabbix.com.br", "//apichat.mabbix.com.br");
+      const MABBIX_ADMIN_EMAIL = Deno.env.get("MABBIX_ADMIN_EMAIL");
+      const MABBIX_ADMIN_PASSWORD = Deno.env.get("MABBIX_ADMIN_PASSWORD");
+
+      if (!MABBIX_BACKEND_URL) {
+        warnings.push("Secret MABBIX_BACKEND_URL ausente — importação da Mabbix pulada.");
+      } else if (!MABBIX_ADMIN_EMAIL || !MABBIX_ADMIN_PASSWORD) {
+        warnings.push(
+          "Secrets MABBIX_ADMIN_EMAIL / MABBIX_ADMIN_PASSWORD não configurados — importação da Mabbix pulada."
+        );
+      } else {
+        const loginResp = await fetch(`${MABBIX_BACKEND_URL}/auth/login`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ email: MABBIX_ADMIN_EMAIL, password: MABBIX_ADMIN_PASSWORD }),
+        });
+        if (!loginResp.ok) {
+          const errText = (await loginResp.text()).slice(0, 200);
+          throw new Error(`Login na Mabbix falhou (${loginResp.status}): ${errText}`);
+        }
+        const loginData = await loginResp.json();
+        const jwt = loginData?.token;
+        if (!jwt) throw new Error("Login na Mabbix não retornou token de sessão");
+
+        const mabbixContacts: any[] = [];
+        for (let page = 1; page <= 200; page++) {
+          const resp = await fetch(
+            `${MABBIX_BACKEND_URL}/contacts?searchParam=&pageNumber=${page}`,
+            { headers: { Authorization: `Bearer ${jwt}` } }
+          );
+          if (!resp.ok) {
+            warnings.push(`Falha ao listar contatos (página ${page}): HTTP ${resp.status}`);
+            break;
+          }
+          const data = await resp.json();
+          const batch: any[] = data?.contacts ?? [];
+          mabbixContacts.push(...batch);
+          if (!data?.hasMore || batch.length === 0) break;
+        }
+        console.log(`Mabbix retornou ${mabbixContacts.length} contatos`);
+
+        for (const ct of mabbixContacts) {
+          providerContacts.push({
+            number: String(ct?.number ?? ""),
+            name: String(ct?.name ?? "").trim() || null,
+            profilePicUrl: ct?.profilePicUrl || null,
+            isGroup: !!ct?.isGroup,
+          });
+        }
+      }
+    }
+
+    const contactRows = new Map<string, Record<string, unknown>>();
+    for (const ct of providerContacts) {
+      if (ct.isGroup) {
+        // Groups never become contact rows, but if the webhook already
+        // created a conversation for the group, refresh its name/photo.
+        const gphone = normalize(ct.number);
+        const gconvo = convoByPhone.get(gphone);
+        if (gconvo) {
+          const gupdates: Record<string, unknown> = {};
+          if (ct.name && (!gconvo.contact_name || gconvo.contact_name === gconvo.phone_number)) {
+            gupdates.contact_name = ct.name;
             namesUpdated++;
           }
-          if (photo && convo.profile_photo_url !== photo) {
-            updates.profile_photo_url = photo;
+          if (ct.profilePicUrl && gconvo.profile_photo_url !== ct.profilePicUrl) {
+            gupdates.profile_photo_url = ct.profilePicUrl;
             photosUpdated++;
           }
-          if (Object.keys(updates).length > 0 && convo.id) {
-            await supabase.from("waba_conversations").update(updates).eq("id", convo.id);
+          if (Object.keys(gupdates).length > 0) {
+            await supabase.from("waba_conversations").update(gupdates).eq("id", gconvo.id);
           }
         }
+        continue;
       }
 
-      // Upsert the contact mirror in chunks (unique key: phone_number)
-      const rows = [...contactRows.values()];
-      for (let i = 0; i < rows.length; i += 500) {
-        const chunk = rows.slice(i, i + 500);
-        const { error } = await supabase
-          .from("whatsapp_contacts")
-          .upsert(chunk, { onConflict: "phone_number" });
-        if (error) throw new Error(`Upsert whatsapp_contacts falhou: ${error.message}`);
+      const phone = normalize(ct.number);
+      if (phone.length < 10) continue;
+      const name = ct.name;
+      const photo = ct.profilePicUrl;
+      const company = companyByPhone.get(phone);
+      if (company) companiesLinked++;
+
+      contactRows.set(phone, {
+        phone_number: phone,
+        contact_name: name,
+        company_id: company?.id ?? null,
+      });
+
+      const convo = convoByPhone.get(phone);
+      if (!convo) {
+        const row = {
+          phone_number: phone,
+          contact_name: name || company?.nome_fantasia || "Contato",
+          profile_photo_url: photo,
+          status: "active",
+          queue_status: "resolved",
+          ai_enabled: true,
+        };
+        newConversations.push(row);
+        convoByPhone.set(phone, {
+          id: "",
+          phone_number: phone,
+          contact_name: row.contact_name as string,
+          profile_photo_url: photo,
+        });
+      } else {
+        const updates: Record<string, unknown> = {};
+        if (name && (!convo.contact_name || convo.contact_name === convo.phone_number)) {
+          updates.contact_name = name;
+          namesUpdated++;
+        }
+        if (photo && convo.profile_photo_url !== photo) {
+          updates.profile_photo_url = photo;
+          photosUpdated++;
+        }
+        if (Object.keys(updates).length > 0 && convo.id) {
+          await supabase.from("waba_conversations").update(updates).eq("id", convo.id);
+        }
       }
-      contactsImported = rows.length;
     }
+
+    // Upsert the contact mirror in chunks (unique key: phone_number)
+    const rows = [...contactRows.values()];
+    for (let i = 0; i < rows.length; i += 500) {
+      const chunk = rows.slice(i, i + 500);
+      const { error } = await supabase
+        .from("whatsapp_contacts")
+        .upsert(chunk, { onConflict: "phone_number" });
+      if (error) throw new Error(`Upsert whatsapp_contacts falhou: ${error.message}`);
+    }
+    contactsImported = rows.length;
 
     // --- 2) Seed conversations from companies that have a WhatsApp number
     // but no conversation yet (previous behavior, kept) ---
@@ -222,6 +289,7 @@ Deno.serve(async (req: Request) => {
 
     const summary = {
       ok: true,
+      provider: getWabaProvider(),
       contactsImported,
       conversationsCreated,
       namesUpdated,

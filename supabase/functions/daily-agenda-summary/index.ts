@@ -1,5 +1,6 @@
 import { serve } from "https://deno.land/std@0.190.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { sendWabaText } from "../_shared/waba-provider.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -16,11 +17,8 @@ serve(async (req: Request) => {
 
   try {
     const OPENAI_API_KEY = Deno.env.get("OPENAI_API_KEY");
-    const MABBIX_BACKEND_URL = Deno.env.get("MABBIX_BACKEND_URL")?.replace("//chat.mabbix.com.br", "//apichat.mabbix.com.br");
-    const MABBIX_CONNECTION_TOKEN = Deno.env.get("MABBIX_CONNECTION_TOKEN");
 
     if (!OPENAI_API_KEY) throw new Error("OPENAI_API_KEY not configured");
-    if (!MABBIX_BACKEND_URL || !MABBIX_CONNECTION_TOKEN) throw new Error("Mabbix not configured");
 
     const supabase = createClient(
       Deno.env.get("SUPABASE_URL")!,
@@ -210,22 +208,8 @@ Regras:
     // Send via Mabbix WhatsApp
     console.log("Sending daily summary to Jose:", summary.substring(0, 200));
 
-    const sendResponse = await fetch(`${MABBIX_BACKEND_URL}/api/messages/send`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${MABBIX_CONNECTION_TOKEN}`,
-      },
-      body: JSON.stringify({
-        number: JOSE_PHONE,
-        openTicket: "0",
-        queueId: "0",
-        body: summary,
-      }),
-    });
-
-    const sendResult = await sendResponse.json();
-    console.log("Summary sent:", JSON.stringify(sendResult).substring(0, 200));
+    const sendResult = await sendWabaText(JOSE_PHONE, summary, { openTicket: false });
+    console.log("Summary sent:", JSON.stringify(sendResult.raw).substring(0, 200));
 
     return new Response(JSON.stringify({ success: true, summary_length: summary.length }), {
       headers: { "Content-Type": "application/json", ...corsHeaders },
