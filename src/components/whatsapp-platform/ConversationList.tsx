@@ -105,20 +105,20 @@ export function ConversationList({ conversations, selectedId, onSelect, unreadId
   ];
 
   return (
-    <div className="flex flex-col h-full bg-card border-r">
+    <div className="flex flex-col h-full bg-white dark:bg-[#111b21] border-r border-[#e9edef] dark:border-[#222d34]">
       {/* Search */}
-      <div className="p-3 border-b space-y-2">
+      <div className="p-2 bg-white dark:bg-[#111b21] space-y-2">
         <div className="relative">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+          <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-[#8696a0]" />
           <Input
             placeholder="Buscar contato ou número..."
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            className="pl-9 h-9 text-sm bg-muted/50 border-0 focus-visible:ring-1"
+            className="pl-9 h-9 text-sm bg-[#f0f2f5] dark:bg-[#202c33] border-0 rounded-lg focus-visible:ring-0 focus-visible:ring-offset-0"
           />
         </div>
 
-        {/* Filter Tabs - Infradesk style horizontal pills */}
+        {/* Filter Tabs */}
         <div className="flex gap-1 overflow-x-auto scrollbar-hide">
           {tabs.map((tab) => (
             <button
@@ -126,16 +126,16 @@ export function ConversationList({ conversations, selectedId, onSelect, unreadId
               onClick={() => setFilter(tab.key)}
               className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-full text-[11px] font-medium whitespace-nowrap transition-all ${
                 filter === tab.key
-                  ? "bg-primary text-primary-foreground shadow-sm"
-                  : "bg-muted/60 text-muted-foreground hover:bg-muted"
+                  ? "bg-[#008069] dark:bg-[#00a884] text-white shadow-sm"
+                  : "bg-[#f0f2f5] dark:bg-[#202c33] text-[#54656f] dark:text-[#aebac1] hover:bg-[#e9edef] dark:hover:bg-[#2a3942]"
               }`}
             >
               <tab.icon className="h-3 w-3" />
               {tab.label}
               <span className={`text-[10px] rounded-full px-1.5 py-0 min-w-[18px] text-center ${
                 filter === tab.key
-                  ? "bg-white/20 text-primary-foreground"
-                  : "bg-muted text-muted-foreground"
+                  ? "bg-white/20 text-white"
+                  : "bg-[#e9edef] dark:bg-[#2a3942] text-[#54656f] dark:text-[#aebac1]"
               }`}>
                 {tab.count}
               </span>
@@ -145,9 +145,9 @@ export function ConversationList({ conversations, selectedId, onSelect, unreadId
       </div>
 
       {/* List */}
-      <ScrollArea className="flex-1">
+      <ScrollArea className="flex-1 bg-white dark:bg-[#111b21]">
         {filtered.length === 0 ? (
-          <div className="p-8 text-center text-muted-foreground">
+          <div className="p-8 text-center text-[#8696a0]">
             <MessageSquare className="h-10 w-10 mx-auto mb-3 opacity-30" />
             <p className="text-sm font-medium">Nenhuma conversa</p>
             <p className="text-xs mt-1">As conversas aparecerão quando clientes enviarem mensagens</p>
@@ -160,10 +160,10 @@ export function ConversationList({ conversations, selectedId, onSelect, unreadId
               <button
                 key={conv.id}
                 onClick={() => onSelect(conv)}
-                className={`w-full flex items-center gap-3 px-3 py-3 text-left transition-all hover:bg-accent/50 active:bg-accent/70 border-b border-border/50 ${
+                className={`w-full flex items-center gap-3 px-3 py-3 text-left transition-colors border-b border-[#f0f2f5] dark:border-[#222d34] ${
                   selectedId === conv.id
-                    ? "bg-accent border-l-[3px] border-l-primary"
-                    : "border-l-[3px] border-l-transparent"
+                    ? "bg-[#f0f2f5] dark:bg-[#2a3942]"
+                    : "hover:bg-[#f5f6f6] dark:hover:bg-[#182229]"
                 }`}
               >
                 {/* Avatar with online/AI indicator */}
@@ -172,43 +172,45 @@ export function ConversationList({ conversations, selectedId, onSelect, unreadId
                     {conv.profile_photo_url && (
                       <AvatarImage src={conv.profile_photo_url} alt={conv.contact_name || conv.phone_number} />
                     )}
-                    <AvatarFallback className="bg-gradient-to-br from-primary/20 to-primary/5 text-primary font-semibold text-sm">
+                    <AvatarFallback className="bg-[#dfe5e7] dark:bg-[#2a3942] text-[#54656f] dark:text-[#aebac1] font-semibold text-sm">
                       {(conv.contact_name || conv.phone_number).slice(0, 2).toUpperCase()}
                     </AvatarFallback>
                   </Avatar>
                   {/* AI indicator dot */}
                   {conv.ai_enabled && (
-                    <div className="absolute -bottom-0.5 -right-0.5 h-5 w-5 rounded-full bg-primary border-2 border-card flex items-center justify-center">
-                      <Sparkles className="h-2.5 w-2.5 text-primary-foreground" />
+                    <div className="absolute -bottom-0.5 -right-0.5 h-5 w-5 rounded-full bg-[#008069] dark:bg-[#00a884] border-2 border-white dark:border-[#111b21] flex items-center justify-center">
+                      <Sparkles className="h-2.5 w-2.5 text-white" />
                     </div>
                   )}
                   {/* Online status dot */}
                   {!conv.ai_enabled && conv.status === "active" && (
-                    <div className="absolute -bottom-0.5 -right-0.5 h-3.5 w-3.5 rounded-full bg-emerald-500 border-2 border-card" />
+                    <div className="absolute -bottom-0.5 -right-0.5 h-3.5 w-3.5 rounded-full bg-[#25d366] border-2 border-white dark:border-[#111b21]" />
                   )}
                 </div>
 
                 <div className="flex-1 min-w-0">
                   {/* Name + time */}
                   <div className="flex justify-between items-baseline gap-2">
-                    <p className={`text-[13px] truncate ${isUnread ? "font-bold" : "font-semibold"}`}>
+                    <p className={`text-[14px] truncate text-[#111b21] dark:text-[#e9edef] ${isUnread ? "font-bold" : "font-medium"}`}>
                       {conv.contact_name || conv.phone_number}
                     </p>
                     <div className="flex items-center gap-1.5 shrink-0">
-                      <span className={`text-[10px] whitespace-nowrap font-medium ${isUnread ? "text-emerald-600" : "text-muted-foreground"}`}>
+                      <span className={`text-[11px] whitespace-nowrap ${isUnread ? "text-[#00a884] font-bold" : "text-[#667781] dark:text-[#8696a0]"}`}>
                         {formatTime(conv.last_message_at)}
                       </span>
-                      {isUnread && (
-                        <span className="h-2.5 w-2.5 rounded-full bg-emerald-500 shrink-0" title="Nova mensagem" />
-                      )}
                     </div>
                   </div>
 
-                  {/* Phone number */}
-                  <p className="text-[11px] text-muted-foreground flex items-center gap-1 mt-0.5">
-                    <Phone className="h-2.5 w-2.5 shrink-0" />
-                    <span className="truncate">{conv.phone_number}</span>
-                  </p>
+                  {/* Phone number + unread dot */}
+                  <div className="flex items-center justify-between gap-2 mt-0.5">
+                    <p className="text-[12.5px] text-[#667781] dark:text-[#8696a0] flex items-center gap-1 min-w-0">
+                      <Phone className="h-2.5 w-2.5 shrink-0" />
+                      <span className="truncate">{conv.phone_number}</span>
+                    </p>
+                    {isUnread && (
+                      <span className="h-[18px] min-w-[18px] px-1 rounded-full bg-[#25d366] shrink-0" title="Nova mensagem" />
+                    )}
+                  </div>
 
                   {/* Tags row */}
                   <div className="flex items-center gap-1.5 mt-1.5">
@@ -218,12 +220,12 @@ export function ConversationList({ conversations, selectedId, onSelect, unreadId
                     </span>
                     {/* AI tag */}
                     {conv.ai_enabled && (
-                      <span className="inline-flex items-center gap-0.5 text-[9px] font-bold tracking-wider text-primary bg-primary/10 rounded px-1.5 py-0.5 leading-none">
+                      <span className="inline-flex items-center gap-0.5 text-[9px] font-bold tracking-wider text-[#008069] dark:text-[#00a884] bg-[#d9fdd3] dark:bg-[#005c4b]/40 rounded px-1.5 py-0.5 leading-none">
                         <Bot className="h-2.5 w-2.5" /> IA
                       </span>
                     )}
                     {/* Channel tag */}
-                    <span className="inline-flex items-center text-[9px] font-medium text-emerald-700 bg-emerald-50 dark:text-emerald-400 dark:bg-emerald-950/40 rounded px-1.5 py-0.5 leading-none">
+                    <span className="inline-flex items-center text-[9px] font-medium text-[#008069] bg-[#d9fdd3] dark:text-[#00a884] dark:bg-[#005c4b]/40 rounded px-1.5 py-0.5 leading-none">
                       WhatsApp
                     </span>
                   </div>
@@ -232,7 +234,7 @@ export function ConversationList({ conversations, selectedId, onSelect, unreadId
               );
             })}
             {filtered.length > MAX_RENDERED && (
-              <div className="p-3 text-center text-[11px] text-muted-foreground">
+              <div className="p-3 text-center text-[11px] text-[#8696a0]">
                 Mostrando {MAX_RENDERED} de {filtered.length} conversas — refine a busca para ver as demais
               </div>
             )}

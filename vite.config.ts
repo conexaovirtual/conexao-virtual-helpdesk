@@ -13,7 +13,7 @@ export default defineConfig(() => ({
     react(),
     VitePWA({
       registerType: 'autoUpdate',
-      includeAssets: ['logo-conexaovirtual.png'],
+      includeAssets: ['logo-conexaovirtual.png', 'icon-conexaovirtual.png', 'icon-conexaovirtual-192.png', 'icon-conexaovirtual-512.png'],
       manifest: {
         name: 'Conexão Virtual - Help Desk TI',
         short_name: 'Help Desk',
@@ -24,14 +24,20 @@ export default defineConfig(() => ({
         start_url: '/',
         icons: [
           {
-            src: '/logo-conexaovirtual.png',
+            src: '/icon-conexaovirtual-192.png',
             sizes: '192x192',
             type: 'image/png'
           },
           {
-            src: '/logo-conexaovirtual.png',
+            src: '/icon-conexaovirtual-512.png',
             sizes: '512x512',
             type: 'image/png'
+          },
+          {
+            src: '/icon-conexaovirtual-512.png',
+            sizes: '512x512',
+            type: 'image/png',
+            purpose: 'maskable'
           }
         ]
       },

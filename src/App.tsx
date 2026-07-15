@@ -10,6 +10,7 @@ import { lazyWithRetry } from "@/lib/lazyWithRetry";
 import Index from "./pages/Index";
 import Auth from "./pages/Auth";
 import { AppLayout } from "./components/layout/AppLayout";
+import { StandaloneWhatsApp } from "./components/layout/StandaloneWhatsApp";
 
 // Lazy load páginas pesadas (com retry automático em caso de falha de chunk após deploy)
 const Dashboard = lazyWithRetry(() => import("./pages/Dashboard"));
@@ -91,6 +92,9 @@ const App = () => (
             <Route path="/public/ticket" element={<PublicTicket />} />
             <Route path="/datto-callback" element={<DattoCallback />} />
             <Route path="/orcamento/:id/print" element={<OrcamentoPrint />} />
+
+            {/* Standalone WhatsApp app window (no sidebar/header chrome) — for PWA/Dock install */}
+            <Route path="/app-whatsapp" element={<StandaloneWhatsApp />} />
 
             {/* Authenticated routes with sidebar */}
             <Route element={<AppLayout />}>
