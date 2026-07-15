@@ -1,5 +1,6 @@
 import { serve } from "https://deno.land/std@0.190.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { sendWabaText, getWabaMediaBase64, getGroupInfo } from "../_shared/waba-provider.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -18,11 +19,21 @@ serve(async (req: Request) => {
     );
 
     const rawBody = await req.text();
-    
+
     // Request-level dedup: hash the raw body to detect identical payloads
     const payloadHash = await hashPayload(rawBody);
-    
+
     const body = JSON.parse(rawBody);
+
+    // Payload da Evolution API (self-hosted) — shape completamente distinto do
+    // da Mabbix (body.event/body.data.key vs body.acao/body.mensagem), entao
+    // este branch fica inalcancavel ate o webhook da Evolution ser configurado
+    // pra apontar pra esta mesma URL. Seguro de implantar antes da virada.
+    if (isEvolutionPayload(body)) {
+      console.log("Evolution webhook received:", rawBody.substring(0, 500));
+      return await handleEvolutionWebhook(supabase, body, payloadHash);
+    }
+
     console.log("Mabbix webhook received:", rawBody.substring(0, 500));
 
     const acao = body.acao;
@@ -38,7 +49,7 @@ serve(async (req: Request) => {
     // Handle message echo (mensagem as object with fromMe)
     if (hasMensagem && !Array.isArray(body.mensagem) && typeof body.mensagem === "object") {
       const msg = body.mensagem;
-      
+
       if (msg.fromMe === true) {
         // When the business sends from phone, sender = recipient (customer) phone
         const recipientPhone = extractPhone(body.sender || msg.participant || "");
@@ -126,8 +137,8 @@ serve(async (req: Request) => {
         const messageType = msgItem.type || "text";
         const mediaUrl = msgItem.fileUrl || null;
         // Deterministic wamid: chamadoId + index (NOT Date.now() which varies between parallel requests)
-        const wamid = body.chamadoId 
-          ? `mabbix_${body.chamadoId}_${i}` 
+        const wamid = body.chamadoId
+          ? `mabbix_${body.chamadoId}_${i}`
           : `mabbix_${payloadHash}_${i}`;
 
         await saveInboundMessage(supabase, {
@@ -193,6 +204,128 @@ function resolveConversationKey(senderRaw: string, participantRaw: string): stri
   return extractPhone(candidates[0] || "");
 }
 
+// =====================================================================
+// Evolution API — deteccao de payload e parsing
+// =====================================================================
+
+function isEvolutionPayload(body: any): boolean {
+  return body?.event === "messages.upsert" && body?.data?.key !== undefined;
+}
+
+// Resolve o telefone real a partir da key da Evolution. O WhatsApp as vezes
+// anonimiza o remetente como "...@lid" — nesse caso o numero real vem em
+// remoteJidAlt (formato "...@s.whatsapp.net"), nunca no proprio remoteJid.
+function resolveEvolutionPhone(key: any): string {
+  const remoteJid = key?.remoteJid || "";
+  const remoteJidAlt = key?.remoteJidAlt || "";
+  const participant = key?.participant || "";
+
+  if (isGroupChat(remoteJid)) return extractPhone(remoteJid);
+  if (isLid(remoteJid) && remoteJidAlt) return extractPhone(remoteJidAlt);
+  if (isLid(remoteJid) && participant && !isLid(participant)) return extractPhone(participant);
+  return extractPhone(remoteJid || participant || remoteJidAlt);
+}
+
+// Baixa midia (audio/imagem/documento/video) da Evolution via mensagem-id e
+// sobe pro Supabase Storage, devolvendo uma URL publica comum. Isso mantem o
+// invariante "media_url e sempre uma URL diretamente baixavel" que o resto do
+// codigo (waba-ai-agent, frontend) ja assume, sem precisar tocar em mais nada.
+async function uploadEvolutionMediaToStorage(supabase: any, messageId: string): Promise<string | null> {
+  try {
+    const media = await getWabaMediaBase64(messageId);
+    if (!media) return null;
+    const bytes = Uint8Array.from(atob(media.base64), (c) => c.charCodeAt(0));
+    const ext = media.mimetype.split(";")[0].split("/")[1] || "bin";
+    const path = `evolution/${messageId}.${ext}`;
+    const { error } = await supabase.storage
+      .from("waba-attachments")
+      .upload(path, bytes, { contentType: media.mimetype, upsert: true });
+    if (error) {
+      console.error("Evolution media storage upload error:", error);
+      return null;
+    }
+    const { data } = supabase.storage.from("waba-attachments").getPublicUrl(path);
+    return data?.publicUrl || null;
+  } catch (err) {
+    console.error("uploadEvolutionMediaToStorage error:", err);
+    return null;
+  }
+}
+
+// Extrai {content, messageType, needsMedia} do shape de mensagem da Evolution.
+function extractEvolutionMessage(data: any): { content: string; messageType: string; needsMedia: boolean } {
+  const msg = data?.message || {};
+  switch (data?.messageType) {
+    case "conversation":
+      return { content: msg.conversation || "[Mensagem sem texto]", messageType: "text", needsMedia: false };
+    case "extendedTextMessage":
+      return { content: msg.extendedTextMessage?.text || "[Mensagem sem texto]", messageType: "text", needsMedia: false };
+    case "audioMessage":
+      return { content: "[Mensagem de áudio]", messageType: "audio", needsMedia: true };
+    case "imageMessage":
+      return { content: msg.imageMessage?.caption || "[Imagem]", messageType: "image", needsMedia: true };
+    case "videoMessage":
+      return { content: msg.videoMessage?.caption || "[Vídeo]", messageType: "video", needsMedia: true };
+    case "documentMessage":
+      return { content: msg.documentMessage?.caption || `[${msg.documentMessage?.fileName || "Documento"}]`, messageType: "document", needsMedia: true };
+    default:
+      return { content: "[Mensagem sem texto]", messageType: "text", needsMedia: false };
+  }
+}
+
+async function handleEvolutionWebhook(supabase: any, body: any, payloadHash: string): Promise<Response> {
+  // So processa novas mensagens; outros eventos (connection.update, qrcode.updated
+  // etc) sao ignorados silenciosamente.
+  if (body.event !== "messages.upsert") return okResponse();
+
+  const data = body.data || {};
+  const key = data.key || {};
+  const messageId: string | undefined = key.id;
+  const phoneNumber = resolveEvolutionPhone(key);
+
+  if (!phoneNumber) {
+    console.log("No valid phone in Evolution payload, skipping");
+    return okResponse();
+  }
+
+  const { content, messageType, needsMedia } = extractEvolutionMessage(data);
+  const contactName = data.pushName || "Desconhecido";
+  const wamid = messageId || `evo_${payloadHash}`;
+  const isGroup = isGroupChat(key.remoteJid || "");
+
+  // Eco de mensagem enviada pelo proprio celular (fromMe) — mesmo tratamento
+  // do caminho Mabbix: salva como outbound e verifica handover pra humano.
+  if (key.fromMe === true) {
+    const mediaUrl = needsMedia && messageId ? await uploadEvolutionMediaToStorage(supabase, messageId) : null;
+    await saveOutboundMessage(supabase, {
+      phoneNumber,
+      contactName: data.pushName,
+      content,
+      messageType,
+      mediaUrl,
+      wamid: messageId ? `outecho_${messageId}` : `evo_outecho_${payloadHash}`,
+      rawPayload: body,
+    });
+    await disableAIForPhoneConversation(supabase, phoneNumber, content || "");
+    return okResponse();
+  }
+
+  const mediaUrl = needsMedia && messageId ? await uploadEvolutionMediaToStorage(supabase, messageId) : null;
+
+  await saveInboundMessage(supabase, {
+    phoneNumber,
+    contactName,
+    content,
+    messageType,
+    mediaUrl,
+    wamid,
+    rawPayload: body,
+    isGroup,
+  });
+
+  return okResponse();
+}
+
 function detectMessageType(mediaType?: string, mediaUrl?: string): string {
   if (!mediaType && !mediaUrl) return "text";
   if (mediaType?.includes("image") || mediaUrl?.match(/\.(jpg|jpeg|png|gif|webp)/i)) return "image";
@@ -249,16 +382,42 @@ async function saveInboundMessage(supabase: any, data: InboundMessageData) {
 
   const previousLastMsgAt = existingConv?.last_message_at || null;
   const previousAiEnabled = existingConv?.ai_enabled ?? true;
+  const isNewConversation = !existingConv;
+
+  // ─── Grupo novo: busca o nome real do grupo ───────────────────────────
+  // O webhook manda o pushName de quem enviou, nunca o nome do grupo — sem
+  // isso, cada grupo aparecia na lista como se fosse uma pessoa aleatória
+  // (ex: "Rainha do pão!!" em vez de "Manutenção informática T2"),
+  // impossível de reconhecer ou vincular à empresa certa. Só busca na
+  // criação da conversa: depois disso o nome fica fixo (não sobrescreve
+  // com o pushName de quem responder em seguida).
+  let resolvedContactName = contactName;
+  let groupParticipants: string[] | null = null;
+  if (isGroup && isNewConversation) {
+    try {
+      const info = await getGroupInfo(`${phoneNumber}@g.us`);
+      if (info?.subject) resolvedContactName = info.subject;
+      groupParticipants = info?.participants || null;
+    } catch (err) {
+      console.error("getGroupInfo failed for", phoneNumber, err);
+    }
+  }
 
   // Upsert conversation
   const profilePhotoUrl = rawPayload?.profilePicUrl || rawPayload?.profilePic || rawPayload?.senderPhoto || null;
 
   const upsertData: any = {
     phone_number: phoneNumber,
-    contact_name: contactName,
     last_message_at: new Date().toISOString(),
     status: "active",
   };
+  // Grupo: só grava o nome na criação (nome do grupo). Em mensagens
+  // seguintes preserva o que já está salvo — sem isso, cada resposta de um
+  // participante diferente reescreveria o nome da conversa com o pushName
+  // dele, perdendo o nome do grupo de novo.
+  if (!isGroup || isNewConversation) {
+    upsertData.contact_name = resolvedContactName;
+  }
   if (profilePhotoUrl) {
     upsertData.profile_photo_url = profilePhotoUrl;
   }
@@ -272,6 +431,15 @@ async function saveInboundMessage(supabase: any, data: InboundMessageData) {
   if (!conversation) {
     console.error("Failed to upsert conversation for", phoneNumber);
     return;
+  }
+
+  // Tenta identificar a empresa do grupo automaticamente: compara o telefone
+  // de cada participante (últimos 8 dígitos, ignora o 9º dígito móvel e o
+  // código do país) com os contatos já vinculados a uma empresa. Só vincula
+  // se todos os participantes conhecidos apontarem pra UMA única empresa —
+  // em caso de ambiguidade, fica sem vincular (evita vínculo errado).
+  if (isGroup && isNewConversation && groupParticipants?.length) {
+    await autoLinkGroupCompany(supabase, phoneNumber, resolvedContactName, groupParticipants);
   }
 
   // ─── Auto-reactivate AI if disabled and last interaction was 30+ minutes ago ───
@@ -372,6 +540,30 @@ async function saveInboundMessage(supabase: any, data: InboundMessageData) {
     console.log("AI globally disabled via WABA_AI_DISABLED — skipping AI agent invocation");
   }
   if (shouldTriggerAI) {
+    // ─── Debounce anti-fragmentação ─────────────────────────────────────
+    // Clientes mandam mensagens picadas ("Sim" / "Abre" / "Urgente") em
+    // segundos. Sem espera, cada fragmento dispara uma execução paralela da
+    // IA — cada uma respondendo e abrindo chamado (caso Hiper Cristal
+    // 07/07/26: 6 chamados duplicados em 3 min). Aguardamos alguns segundos
+    // e só seguimos se esta ainda for a última mensagem "respondível" da
+    // conversa; senão, a invocação da mensagem mais nova assume (ela lê o
+    // histórico completo, então nada se perde).
+    const DEBOUNCE_MS = 10000;
+    await new Promise((r) => setTimeout(r, DEBOUNCE_MS));
+    const { data: newestInbound } = await supabase
+      .from("waba_messages")
+      .select("id")
+      .eq("conversation_id", conversation.id)
+      .eq("direction", "inbound")
+      .in("message_type", ["text", "audio", "image"])
+      .order("created_at", { ascending: false })
+      .order("id", { ascending: false })
+      .limit(1);
+    if (newestInbound?.[0]?.id && newestInbound[0].id !== insertedMsg.id) {
+      console.log(`Debounce: mensagem mais nova na conversa ${conversation.id}, esta invocação não chama a IA`);
+      return;
+    }
+
     try {
       const aiResponse = await fetch(
         `${Deno.env.get("SUPABASE_URL")}/functions/v1/waba-ai-agent`,
@@ -383,6 +575,7 @@ async function saveInboundMessage(supabase: any, data: InboundMessageData) {
           },
           body: JSON.stringify({
             conversation_id: conversation.id,
+            message_id: insertedMsg.id,
             message_content: content,
             phone_number: phoneNumber,
             is_group: isGroup,
@@ -396,6 +589,69 @@ async function saveInboundMessage(supabase: any, data: InboundMessageData) {
     } catch (aiErr) {
       console.error("AI Agent invocation failed:", aiErr);
     }
+  }
+}
+
+// Últimos 8 dígitos de um telefone: identifica o assinante independente do
+// código do país, DDD ou do 9º dígito móvel (que o WhatsApp às vezes omite
+// e às vezes não — "556281164244" e "5562981164244" são a mesma pessoa).
+function last8Digits(phone: string): string {
+  return (phone || "").replace(/\D/g, "").slice(-8);
+}
+
+// Tenta vincular automaticamente um grupo à empresa cujos contatos batem com
+// os participantes do grupo. Consulta whatsapp_contacts e company_contacts
+// (as duas fontes de "telefone → empresa" já usadas no resto do sistema) e só
+// vincula se houver exatamente UMA empresa candidata — grupos com gente de
+// empresas diferentes (ou nenhum contato conhecido) ficam sem vínculo
+// automático, para não errar. O vínculo é gravado como um whatsapp_contacts
+// normal com phone_number = ID do grupo, reaproveitando o mesmo mecanismo que
+// já vincula contatos individuais (ContactInfoPanel, abrir chamado, gerar OS
+// já leem daí, sem precisar de nenhuma mudança nesses lugares).
+async function autoLinkGroupCompany(
+  supabase: any,
+  groupPhoneNumber: string,
+  groupName: string,
+  participants: string[]
+) {
+  try {
+    const participantSuffixes = new Set(
+      participants.map(last8Digits).filter((s) => s.length === 8)
+    );
+    if (participantSuffixes.size === 0) return;
+
+    const [{ data: waContacts }, { data: ccContacts }] = await Promise.all([
+      supabase.from("whatsapp_contacts").select("phone_number, company_id").not("company_id", "is", null),
+      supabase.from("company_contacts").select("whatsapp, company_id").not("whatsapp", "is", null),
+    ]);
+
+    const matchedCompanyIds = new Set<string>();
+    for (const c of waContacts || []) {
+      if (participantSuffixes.has(last8Digits(c.phone_number))) matchedCompanyIds.add(c.company_id);
+    }
+    for (const c of ccContacts || []) {
+      if (participantSuffixes.has(last8Digits(c.whatsapp))) matchedCompanyIds.add(c.company_id);
+    }
+
+    if (matchedCompanyIds.size !== 1) {
+      if (matchedCompanyIds.size > 1) {
+        console.log(`Grupo "${groupName}" (${groupPhoneNumber}): participantes de ${matchedCompanyIds.size} empresas diferentes, não vinculando automaticamente`);
+      }
+      return;
+    }
+
+    const [companyId] = matchedCompanyIds;
+    const { error } = await supabase.from("whatsapp_contacts").upsert(
+      { phone_number: groupPhoneNumber, contact_name: groupName, company_id: companyId },
+      { onConflict: "phone_number" }
+    );
+    if (error) {
+      console.error("autoLinkGroupCompany upsert error:", error);
+      return;
+    }
+    console.log(`Grupo "${groupName}" (${groupPhoneNumber}) auto-vinculado à empresa ${companyId}`);
+  } catch (err) {
+    console.error("autoLinkGroupCompany error:", err);
   }
 }
 
@@ -495,15 +751,7 @@ async function captureCsatRating(supabase: any, conversationId: string, phoneNum
       : "Obrigado pelo retorno! 🙏 Vamos trabalhar para melhorar — se quiser, conte o que podemos fazer melhor.";
 
     // Envia o agradecimento e salva como 'agent' para que o eco NÃO desligue a IA
-    const MABBIX_URL = Deno.env.get("MABBIX_BACKEND_URL")?.replace("//chat.mabbix.com.br", "//apichat.mabbix.com.br");
-    const MABBIX_TOKEN = Deno.env.get("MABBIX_CONNECTION_TOKEN");
-    if (MABBIX_URL && MABBIX_TOKEN) {
-      await fetch(`${MABBIX_URL}/api/messages/send`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${MABBIX_TOKEN}` },
-        body: JSON.stringify({ number: phoneNumber, body: thanks, openTicket: "0", queueId: "0" }),
-      });
-    }
+    await sendWabaText(phoneNumber, thanks, { openTicket: false });
     await supabase.from("waba_messages").insert({
       conversation_id: conversationId,
       direction: "outbound",
