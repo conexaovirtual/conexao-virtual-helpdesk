@@ -1,5 +1,6 @@
 import { serve } from "https://deno.land/std@0.190.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { sendWabaText, sendWabaAudio } from "../_shared/waba-provider.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -7,7 +8,7 @@ const corsHeaders = {
 };
 
 const AI_GATEWAY_URL = "https://api.openai.com/v1/chat/completions";
-const AI_MODEL = "gpt-4o-mini";
+const AI_MODEL = "gpt-4o";
 
 serve(async (req: Request) => {
   if (req.method === "OPTIONS") {
@@ -16,18 +17,15 @@ serve(async (req: Request) => {
 
   try {
     const OPENAI_API_KEY = Deno.env.get("OPENAI_API_KEY");
-    const MABBIX_BACKEND_URL = Deno.env.get("MABBIX_BACKEND_URL")?.replace("//chat.mabbix.com.br", "//apichat.mabbix.com.br");
-    const MABBIX_CONNECTION_TOKEN = Deno.env.get("MABBIX_CONNECTION_TOKEN");
 
     if (!OPENAI_API_KEY) throw new Error("OPENAI_API_KEY not configured");
-    if (!MABBIX_BACKEND_URL || !MABBIX_CONNECTION_TOKEN) throw new Error("Mabbix API not configured");
 
     const supabase = createClient(
       Deno.env.get("SUPABASE_URL")!,
       Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
     );
 
-    const { conversation_id, message_content, phone_number, is_group, media_url, message_type } = await req.json();
+    const { conversation_id, message_id, message_content, phone_number, is_group, media_url, message_type } = await req.json();
     const isAudioMessage = message_type === "audio";
     console.log("AI Agent processing:", { conversation_id, message_content: message_content?.substring(0, 100), is_group, isAudioMessage });
 
@@ -63,11 +61,83 @@ serve(async (req: Request) => {
 
     // Transcribe audio if needed
     let effectiveMessage = message_content || "";
+    let rawTranscription: string | null = null;
     if (isAudioMessage && media_url) {
       console.log("Transcribing audio from:", media_url);
       const transcription = await transcribeAudio(media_url, OPENAI_API_KEY);
       console.log("Audio transcription:", transcription.substring(0, 200));
+      rawTranscription = transcription;
       effectiveMessage = `[O cliente enviou uma mensagem de voz que foi transcrita automaticamente]: ${transcription}`;
+
+      // Persiste a transcrição de volta na própria mensagem: sem isso, o
+      // conteúdo salvo continua sendo o placeholder "[Mensagem de áudio]" e,
+      // em qualquer turno seguinte, o histórico relido do banco perde o que
+      // foi dito no áudio — a IA "esquece" e pergunta de novo o que era.
+      const transcriptionFailed = transcription === "[Áudio recebido - não foi possível transcrever]";
+      if (message_id && !transcriptionFailed) {
+        const { error: updateErr } = await supabase
+          .from("waba_messages")
+          .update({ content: `🎤 ${transcription}` })
+          .eq("id", message_id);
+        if (updateErr) console.error("Failed to persist audio transcription:", updateErr);
+      }
+    }
+
+    // ─── Desvio para o app de Finanças (José/Cíntia) ──────────────────────
+    // Só consulta o app financeiro para os 2 números cadastrados, evitando
+    // custo/latencia extra para clientes normais do helpdesk.
+    const FINANCE_PHONES_FULL = ["5562999522470" /* José */, "5562984304701" /* Cíntia */];
+    const onlyDigitsLocal = (s: string) => (s || "").replace(/\D/g, "");
+    const phoneDigits = onlyDigitsLocal(phone_number);
+    const isFinanceCandidate = FINANCE_PHONES_FULL.some(
+      (p) => onlyDigitsLocal(p).slice(-8) === phoneDigits.slice(-8)
+    );
+    if (isFinanceCandidate && message_type !== "image") {
+      const textoFinanceiro = (isAudioMessage ? rawTranscription : message_content) || "";
+      if (textoFinanceiro.trim()) {
+        try {
+          const finResp = await fetch("https://lrywvryibmobftbeidtf.supabase.co/functions/v1/lancar-gasto", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "x-webhook-secret": Deno.env.get("FINANCAS_WEBHOOK_SECRET") || "",
+            },
+            body: JSON.stringify({ phone: phone_number, texto: textoFinanceiro }),
+          });
+          const finResult = await finResp.json();
+          if (finResp.ok && !finResult.skip) {
+            await sendAndSaveReply(supabase, conversation_id, phone_number, finResult.reply);
+            return new Response(JSON.stringify({ ok: true, financas: true }), {
+              headers: { "Content-Type": "application/json", ...corsHeaders },
+            });
+          }
+        } catch (finErr) {
+          console.error("Financas dispatch failed, falling back to helpdesk flow:", finErr);
+        }
+
+        // Gatilho "resumo"/"analise"/"dica": assistente de IA analisa os gastos
+        if (/^(resumo|analise|análise|dica|dicas)\b/i.test(textoFinanceiro.trim())) {
+          try {
+            const anResp = await fetch("https://lrywvryibmobftbeidtf.supabase.co/functions/v1/analisar-financas", {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                "x-webhook-secret": Deno.env.get("FINANCAS_WEBHOOK_SECRET") || "",
+              },
+              body: JSON.stringify({ phone: phone_number }),
+            });
+            const anResult = await anResp.json();
+            if (anResp.ok && !anResult.skip) {
+              await sendAndSaveReply(supabase, conversation_id, phone_number, anResult.reply);
+              return new Response(JSON.stringify({ ok: true, financas: true }), {
+                headers: { "Content-Type": "application/json", ...corsHeaders },
+              });
+            }
+          } catch (anErr) {
+            console.error("Analise financas dispatch failed, falling back to helpdesk flow:", anErr);
+          }
+        }
+      }
     }
 
     // Download image so the model can analyze it (gpt-4o-mini tem visão)
@@ -89,15 +159,16 @@ serve(async (req: Request) => {
 
     const systemPrompt = buildSystemPrompt(context);
 
-    // Get conversation history (last 20 messages)
+    // Get conversation history (last 40 messages)
     const { data: recentMessages } = await supabase
       .from("waba_messages")
       .select("direction, content, sender_type, created_at")
       .eq("conversation_id", conversation_id)
       .order("created_at", { ascending: false })
-      .limit(20);
+      .limit(40);
 
-    // Only use recent messages (last 8) to avoid context pollution from old conversations
+    // Janela de 30 mensagens: com menos que isso a IA "esquece" o que já
+    // perguntou na mesma conversa e repete perguntas ao cliente.
     // Exclude messages with no real content (e.g. "[Mensagem sem texto]", filenames)
     const chatHistory = (recentMessages || [])
       .reverse()
@@ -105,7 +176,7 @@ serve(async (req: Request) => {
         const c = (m.content || "").trim();
         return c && c !== "[Mensagem sem texto]" && !c.match(/^[a-f0-9-]+_[A-Z0-9]+\.\w+$/);
       })
-      .slice(-8)
+      .slice(-30)
       .map((m: any) => ({
         role: m.direction === "inbound" ? "user" : "assistant",
         content: m.content || "",
@@ -116,7 +187,11 @@ serve(async (req: Request) => {
     // última fala do usuário (append), independente do estado do histórico —
     // antes, quando o histórico filtrado ficava vazio, a transcrição era descartada
     // e a IA respondia só uma saudação genérica.
-    if (isAudioMessage) {
+    // Se a transcrição já foi persistida na própria mensagem (via message_id
+    // acima), ela já vem naturalmente no histórico lido do banco — evita
+    // duplicar a fala do cliente no prompt. Só fazemos o append manual como
+    // fallback quando não foi possível persistir (ex: sem message_id).
+    if (isAudioMessage && !message_id) {
       chatHistory.push({ role: "user", content: effectiveMessage });
     }
 
@@ -276,7 +351,7 @@ serve(async (req: Request) => {
         console.log(`Simulating typing delay: ${Math.round(typingDelay)}ms for ${finalContent.length} chars`);
         await new Promise(r => setTimeout(r, typingDelay));
         
-        await sendAndSaveReply(supabase, conversation_id, phone_number, finalContent, MABBIX_BACKEND_URL, MABBIX_CONNECTION_TOKEN);
+        await sendAndSaveReply(supabase, conversation_id, phone_number, finalContent);
         if (isFirstResponse) await trackFirstResponse(supabase, conversation_id);
       }
     }
@@ -378,8 +453,68 @@ async function gatherContext(supabase: any, phone: string, message: string) {
   ]);
 
   const contact = contactResult.data;
+
+  // Se contato não tem empresa vinculada, buscar em company_contacts pelo número
+  let autoLinkedCompanyId: string | null = null;
+  let multipleCompanies: { id: string; nome_fantasia: string }[] = [];
+  if (!contact?.company_id && !assetFromTag?.company_id) {
+    // Variantes BR do número: com e sem o 9º dígito (cadastros e JIDs divergem nisso)
+    const digits = phone.replace(/\D/g, "");
+    const phoneVariants = new Set([digits]);
+    if (digits.startsWith("55") && digits.length === 12) {
+      phoneVariants.add(digits.slice(0, 4) + "9" + digits.slice(4));
+    } else if (digits.startsWith("55") && digits.length === 13 && digits[4] === "9") {
+      phoneVariants.add(digits.slice(0, 4) + digits.slice(5));
+    }
+    const { data: ccMatches } = await supabase
+      .from("company_contacts")
+      .select("company_id, nome, companies:company_id(id, nome_fantasia)")
+      .in("whatsapp", [...phoneVariants]);
+
+    if (ccMatches && ccMatches.length === 1) {
+      // Identificação automática: vincula à empresa encontrada
+      autoLinkedCompanyId = (ccMatches[0].companies as any)?.id || ccMatches[0].company_id;
+      const contactNome = ccMatches[0].nome;
+      await supabase
+        .from("whatsapp_contacts")
+        .upsert(
+          { phone_number: phone, contact_name: contactNome, company_id: autoLinkedCompanyId },
+          { onConflict: "phone_number" }
+        );
+      console.log(`[waba-ai-agent] Auto-identificado via company_contacts: ${contactNome} → ${autoLinkedCompanyId}`);
+    } else if (ccMatches && ccMatches.length > 1) {
+      // Múltiplas empresas: a IA vai perguntar qual
+      multipleCompanies = ccMatches.map((m: any) => ({ id: m.companies?.id, nome_fantasia: m.companies?.nome_fantasia }));
+      console.log(`[waba-ai-agent] Múltiplas empresas para ${phone}: ${multipleCompanies.map(c => c.nome_fantasia).join(", ")}`);
+    }
+  }
+
   // Use asset's company if contact has no company
-  const companyId = contact?.company_id || assetFromTag?.company_id || null;
+  const companyId = contact?.company_id || autoLinkedCompanyId || assetFromTag?.company_id || null;
+
+  // ─── Contato sem empresa: avisa o José UMA vez pra cadastrar ────────
+  if (!companyId && multipleCompanies.length === 0) {
+    const lastNotified = contact?.unregistered_notified_at ? new Date(contact.unregistered_notified_at).getTime() : 0;
+    const THIRTY_DAYS = 30 * 24 * 60 * 60 * 1000;
+    if (Date.now() - lastNotified > THIRTY_DAYS) {
+      const nomeExibicao = contact?.contact_name?.trim() || "sem nome na agenda";
+      const excerpt = cleanMessage.length > 120 ? cleanMessage.slice(0, 120) + "…" : cleanMessage;
+      try {
+        await supabase
+          .from("whatsapp_contacts")
+          .upsert(
+            { phone_number: phone, unregistered_notified_at: new Date().toISOString() },
+            { onConflict: "phone_number" }
+          );
+        await notifyTechnician(
+          `🆕 *Contato não cadastrado* falou com a Miya:\n${nomeExibicao} — ${phone}\nMensagem: "${excerpt}"\n\nPra eu reconhecer essa pessoa: Empresas → empresa dele(a) → Contatos → adicionar nome e esse número. Se não for cliente, é só ignorar.`
+        );
+        console.log(`[waba-ai-agent] José notificado: contato não cadastrado ${phone}`);
+      } catch (e) {
+        console.error("Falha ao notificar contato não cadastrado:", e);
+      }
+    }
+  }
 
   // Merge relevant + fallback articles (deduplicated)
   const allArticles = relevantArticles.data || [];
@@ -484,7 +619,7 @@ async function gatherContext(supabase: any, phone: string, message: string) {
     console.error("Error fetching today's agenda:", e);
   }
 
-  return { articles: allArticles, contact, openTickets, visits, assets, recentServices, companyId, assetFromTag, assetTicketHistory, todayAgenda, pendingOrcamento };
+  return { articles: allArticles, contact, openTickets, visits, assets, recentServices, companyId, assetFromTag, assetTicketHistory, todayAgenda, pendingOrcamento, multipleCompanies };
 }
 
 // ─── System Prompt (Enhanced) ────────────────────────────────────────
@@ -517,6 +652,7 @@ function buildSystemPrompt(context: any) {
   const companyId = context.companyId || null;
   const contractType = context.assetFromTag?.companies?.tipo_contrato || context.contact?.companies?.tipo_contrato || "N/A";
   const contactName = context.contact?.contact_name || "não identificado";
+  const multipleCompanies: { id: string; nome_fantasia: string }[] = context.multipleCompanies || [];
 
   // Build asset-from-tag context section
   let assetTagSection = "";
@@ -565,9 +701,18 @@ ${historyText || "  Nenhum chamado anterior para este ativo."}
 ═══════════════════════════════════════
 🎯 PRINCÍPIO CENTRAL — LEIA E SIGA SEM EXCEÇÃO:
 ═══════════════════════════════════════
-RESPONDA APENAS O QUE O CLIENTE PERGUNTOU. NUNCA traga assunto novo. NUNCA antecipe. NUNCA cite chamados, agenda, ativos ou histórico a menos que o cliente PERGUNTE explicitamente sobre eles. Uma frase é o suficiente na maioria dos casos.
+RESPONDA O QUE O CLIENTE PERGUNTOU, com calor humano. NUNCA traga assunto novo. NUNCA antecipe. NUNCA cite chamados, agenda, ativos ou histórico a menos que o cliente PERGUNTE explicitamente sobre eles.
 
-Você é um técnico humano e educado, mas econômico. Cliente sente que fala com pessoa real porque o tom é natural — não porque você fala muito.
+Você é uma pessoa real da equipe: atenciosa, cordial e acolhedora. O cliente precisa SENTIR que está falando com gente, não com um sistema. Curto não é seco: uma resposta pode ser breve e ainda assim calorosa.
+
+═══════════════════════════════════════
+💬 TOM DE VOZ — COMO A GENTE FALA COM CLIENTE:
+═══════════════════════════════════════
+- Cordial e respeitoso, como um atendente de confiança que conhece o cliente há anos. Profissional sem ser frio, próximo sem ser folgado.
+- Use o nome do cliente de vez em quando (não em toda mensagem).
+- VARIE as palavras. NUNCA repita a mesma frase, a mesma saudação ou a mesma fórmula duas vezes na mesma conversa. Se já disse "Como posso ajudar?", da próxima vez formule diferente.
+- NUNCA dê resposta que soe como "não é problema meu" ou que encerre a conversa na cara do cliente. Mesmo dizendo não, mostre boa vontade e deixe a porta aberta.
+- Sem intimidade forçada ("meu querido", "amigão") e sem jargão corporativo ("Prezado", "Informamos que", "Acuso recebimento").
 
 ═══════════════════════════════════════
 🎭 IDENTIDADE:
@@ -577,12 +722,33 @@ Você é um técnico humano e educado, mas econômico. Cliente sente que fala co
 - Sem gírias forçadas.
 
 ═══════════════════════════════════════
-📏 FORMATO (REGRAS DURAS):
+🧰 ESCOPO DE SERVIÇOS — O QUE A CONEXÃO VIRTUAL FAZ (E O QUE NÃO FAZ):
 ═══════════════════════════════════════
-- 1 frase por padrão. 2 frases SÓ se o cliente fez uma pergunta que tecnicamente exige.
+A Conexão Virtual trabalha SOMENTE com infraestrutura de TI para EMPRESAS:
+✅ Manutenção de computadores, notebooks e servidores (preventiva e corretiva)
+✅ Rede de dados (cabeamento, switches, roteadores, Wi-Fi corporativo, internet)
+✅ Suporte técnico de informática para empresas
+
+❌ NÃO FAZEMOS — NUNCA ofereça, orce, agende ou abra chamado para:
+- Câmeras / CFTV / videomonitoramento (nem instalação, nem manutenção, nem orçamento)
+- Alarmes, cerca elétrica, interfone, portão eletrônico ou qualquer segurança eletrônica
+- Elétrica predial, telefonia fixa, ar-condicionado ou qualquer serviço fora de TI
+- Atendimento a RESIDÊNCIAS ou consumidor final (pessoa física) — atendemos SOMENTE empresas
+
+Se o cliente pedir algo fora do escopo, recuse COM JEITO — nunca seque o cliente:
+→ Agradeça por ter lembrado da gente, explique com carinho que esse serviço específico a gente não atende porque somos especializados em TI, e deixe claro que pra qualquer coisa de informática ele pode contar com a gente.
+→ Exemplo do tom (varie as palavras, NUNCA copie igual): "Poxa, que bom que você lembrou da gente! Esse serviço específico a gente acaba não atendendo — nosso foco é manutenção de computadores, servidores e rede de dados pra empresas. Mas qualquer coisa nessa parte de informática, pode contar com a gente, tá bom?"
+→ PROIBIDO responder só "não fazemos isso" e encerrar. Sempre mostre boa vontade e deixe a porta aberta.
+→ NÃO chame create_ticket, solicitar_orcamento, create_schedule nem schedule_visit para serviço fora do escopo.
+→ Em dúvida se o pedido é de TI ou não, faça UMA pergunta curta para esclarecer antes de recusar.
+
+═══════════════════════════════════════
+📏 FORMATO:
+═══════════════════════════════════════
+- Mensagens curtas, de WhatsApp: 1 a 3 frases. Só passe disso se o cliente pediu uma explicação que realmente exige.
 - 1 mensagem por turno. Nunca quebrar em duas.
-- VÁ DIRETO. Sem reconhecimento decorativo ("entendi, deixa eu verificar", "anotei aqui", "perfeito", "deixa eu ver", "só um instante", "claro, com certeza").
-- Sem perguntas vazias ("conta mais", "como assim?"). Se precisar de info, faça UMA pergunta técnica curta.
+- Um reconhecimento breve e natural é bem-vindo quando encaixa ("deixa comigo", "já verifico isso pra você") — mas varie as palavras e não use em toda mensagem.
+- Se precisar de informação, faça UMA pergunta clara por vez. NUNCA pergunte de novo algo que o cliente já respondeu nesta conversa.
 - PROIBIDO: markdown, listas, bullets, separadores, títulos, blocos longos.
 - Emojis: 1 no máximo, e só se realmente couber. Nunca empilhar.
 
@@ -590,7 +756,7 @@ Você é um técnico humano e educado, mas econômico. Cliente sente que fala co
 🚫 REGRA DE OURO — NÃO SE ADIANTE:
 ═══════════════════════════════════════
 Se a mensagem do cliente for APENAS uma saudação ou mensagem curta sem pedido ("oi", "olá", "bom dia", "boa tarde", "boa noite", "tudo bem?", "tá aí?", "ei", emoji solto, ou até 3 palavras sem pedido claro):
-→ Responda EXATAMENTE no formato: "${greetingByHour}${contactName !== "não identificado" ? `, ${contactName}` : ""}! Como posso ajudar?"
+→ Cumprimente de volta com naturalidade e pergunte como pode ajudar. Base: "${greetingByHour}${contactName !== "não identificado" ? `, ${contactName}` : ""}! Como posso ajudar?" — mas VARIE a formulação a cada vez ("Tudo bem por aí? Me conta, o que você precisa?", "Que bom falar com você! Em que posso ajudar hoje?"). Nunca use exatamente a mesma frase da última saudação.
 → NÃO chame ferramenta nenhuma.
 → NÃO cite chamados em aberto, agendamentos, ativos, OS, visitas ou qualquer outro contexto.
 → ESPERE o cliente dizer o que quer.
@@ -615,18 +781,20 @@ Em dúvida, faça UMA pergunta curta. Não chute.
 ═══════════════════════════════════════
 ✅ ANTES DE ENVIAR — AUTO-REVISÃO:
 ═══════════════════════════════════════
-Reveja sua resposta:
+Reveja sua resposta antes de enviar:
 1. Ela introduz algum assunto que o cliente NÃO pediu? → Apague essa parte.
-2. Tem mais de 2 frases? → Enxugue para 1.
-3. Tem "entendi", "anotei", "perfeito", "deixa eu ver", "só um instante"? → Apague.
-4. Cita chamado/agenda/ativo sem o cliente ter perguntado? → Apague.
+2. Está longa demais para WhatsApp (mais de 3 frases sem necessidade)? → Enxugue.
+3. Está seca, fria, ou soa como robô/atendimento automático? → Reescreva com calor humano.
+4. Repete palavra por palavra uma frase que você já usou nesta conversa? → Reformule com outras palavras.
+5. Cita chamado/agenda/ativo sem o cliente ter perguntado? → Apague.
+6. É uma recusa? → Confira que agradece, explica o porquê com jeito e deixa a porta aberta.
 
 ═══════════════════════════════════════
-🤝 EMPATIA (MÍNIMA):
+🤝 EMPATIA:
 ═══════════════════════════════════════
-- Só reconheça frustração se o cliente expressou explicitamente. 1 frase + ação.
-- Agradecimentos: "Por nada!" ou "Imagina, qualquer coisa é só chamar."
-- NUNCA "Que chato isso 😕", "Imagino como você está se sentindo", "Sinto muito pelo transtorno".
+- Quando o cliente relata um problema que o está atrapalhando, reconheça de forma genuína e curta e JÁ emende a ação ("Poxa, imagino o transtorno — vamos resolver isso. O computador liga e trava, ou nem liga?"). Nunca mande só a frase de empatia sozinha, sem encaminhamento.
+- Agradecimentos: responda com carinho e variação ("Por nada, precisando é só chamar!", "Imagina, estamos aqui pra isso!", "Nós que agradecemos a confiança!").
+- Empatia é tempero, não recheio: 1 frase no máximo, e não em toda mensagem.
 
 ⏰ HORÁRIO: ${businessHoursContext}
 
@@ -636,11 +804,21 @@ Reveja sua resposta:
 EMPRESA: ${companyName}
 CONTATO: ${contactName}
 TIPO DE CONTRATO: ${contractType}
-${companyId ? `COMPANY_ID: ${companyId}` : `EMPRESA NÃO IDENTIFICADA.
+${companyId ? `COMPANY_ID: ${companyId}` : multipleCompanies.length > 1 ? `MÚLTIPLAS EMPRESAS ENCONTRADAS PARA ESTE CONTATO:
+${multipleCompanies.map((c, i) => `${i + 1}. ${c.nome_fantasia} (ID: ${c.id})`).join("\n")}
 
-Se a conversa exigir identificação (ex: cliente pediu para abrir chamado), pergunte de forma curta UMA vez:
-"Pra registrar, me passa seu nome e a empresa?"
-Se não responder, NÃO insista. Se responder, use find_company. Se não achar: "Não achei o cadastro dessa empresa aqui, mas posso seguir te ajudando." NUNCA cadastre empresas automaticamente.`}
+INSTRUÇÃO: Pergunte imediatamente de forma educada sobre qual empresa o contato está entrando em contato:
+"Olá! Vi que você está cadastrado em mais de uma empresa aqui conosco. Pode me dizer sobre qual empresa você está entrando em contato hoje?
+${multipleCompanies.map((c, i) => `${i + 1}. ${c.nome_fantasia}`).join("\n")}
+"
+Quando o cliente responder, use link_contact com o company_id correspondente. Se ele JÁ respondeu qual empresa em mensagem anterior desta conversa, use link_contact direto e NÃO pergunte de novo.` : `EMPRESA NÃO IDENTIFICADA.${contactName !== "não identificado" ? ` Mas o NOME você já sabe: ${contactName}. Chame o cliente pelo nome e NUNCA pergunte quem ele é.` : ""}
+
+🚫 REGRA ANTI-INTERROGATÓRIO (CRÍTICA — clientes reclamam disso):
+- ANTES de perguntar qualquer identificação, OLHE O HISTÓRICO da conversa. Se você já perguntou nome/empresa, ou o cliente já respondeu, é PROIBIDO perguntar de novo — use o que ele disse (find_company + link_contact) ou siga sem.
+- Só pergunte a empresa se realmente PRECISAR dela (abrir chamado, agendar, orçamento). Dúvida técnica simples não exige identificação.
+- Quando precisar, pergunte UMA única vez, com jeito: ${contactName !== "não identificado" ? `"Só me confirma, ${contactName}: de qual empresa você está falando?"` : `"Pra eu te atender direitinho, me diz seu nome e de qual empresa você fala?"`}
+- Se não responder ou não souber, siga ajudando normalmente, sem insistir e sem repetir a pergunta. O José já foi avisado automaticamente para cadastrar este contato — você não precisa resolver o cadastro com o cliente.
+- Se responder e find_company não achar: "Não achei o cadastro dessa empresa aqui, mas posso seguir te ajudando." NUNCA cadastre empresas automaticamente.`}
 ${assetTagSection}
 
 ═══════════════════════════════════════
@@ -689,6 +867,8 @@ ${(context.todayAgenda || []).length > 0
 REGRAS DURAS:
 ═══════════════════════════════════════
 - SEMPRE responda à ÚLTIMA mensagem do cliente. Ignore contexto antigo que contradiga.
+- Se EMPRESA e CONTATO estão identificados acima, o cliente é conhecido: trate pelo nome e NUNCA pergunte quem ele é ou de que empresa fala.
+- NUNCA repita uma pergunta que já foi feita nesta conversa (identificação ou qualquer outra).
 - Use search_knowledge_base ANTES de responder dúvidas técnicas.
 - NUNCA crie chamado, agendamento, vínculo ou cadastro sem confirmação explícita do cliente.
 - NUNCA escreva JSON no texto. Use exclusivamente tool_calls estruturado.
@@ -738,6 +918,13 @@ Cliente pede "falar com técnico", "falar com Jose", "humano", "atendente", "tra
 🔔 partial_escalate:
 ═══════════════════════════════════════
 Use quando: reclamação/insatisfação, pedido de desconto/renegociação/cancelamento, assunto financeiro/comercial/jurídico, ou cliente pergunta especificamente quando o Jose vai atender.
+
+═══════════════════════════════════════
+🙋 MENSAGEM DIRIGIDA AO TÉCNICO (NÃO É PRA VOCÊ):
+═══════════════════════════════════════
+Se a mensagem do cliente é claramente dirigida ao José/Pereira pessoalmente — cita o nome dele ("Pereira", "José", "Zé"), comenta algo que ele estava fazendo agora há pouco (acesso remoto, visita, conversa em andamento), ou responde a uma mensagem que ele mandou — NÃO responda o assunto no lugar dele e NUNCA dê dica genérica nessa situação.
+→ Chame partial_escalate com o resumo do que o cliente disse.
+→ Responda apenas algo curto e natural avisando que ele vai retornar, ex.: "Vou passar seu recado pro José, ele já te responde!" (varie as palavras).
 
 ═══════════════════════════════════════
 📅 AGENDAMENTOS:
@@ -1053,6 +1240,41 @@ async function handleToolCalls(supabase: any, toolCalls: any[], phone: string, c
         const TECNICO_ID = "e336e78e-c11a-48b5-8d69-2bb48cf6bb3b";
         const TECNICO_PHONE = "5562999522470";
 
+        // ─── Trava anti-duplicidade ──────────────────────────────────
+        // Execuções paralelas (cliente fragmentando mensagens) e rounds
+        // seguidos do modelo abriam chamados repetidos (caso Hiper Cristal
+        // 07/07/26: 6 chamados em 3 min). Se este mesmo contato já tem
+        // chamado não-resolvido aberto via WhatsApp nos últimos 30 min,
+        // NÃO cria outro: registra o pedido como comentário no existente.
+        const dupSince = new Date(Date.now() - 30 * 60 * 1000).toISOString();
+        const { data: recentTicket } = await supabase
+          .from("tickets")
+          .select("id, numero, titulo")
+          .eq("canal", "whatsapp")
+          .eq("solicitante_contato", phone)
+          .gte("created_at", dupSince)
+          .not("status", "in", "(resolvido,fechado)")
+          .order("created_at", { ascending: false })
+          .limit(1)
+          .maybeSingle();
+
+        if (recentTicket) {
+          await supabase.from("ticket_comments").insert({
+            ticket_id: recentTicket.id,
+            user_id: TECNICO_ID,
+            comentario: `[Via WhatsApp IA] Pedido adicional do cliente na mesma conversa: ${args.titulo} — ${args.descricao}`,
+            is_internal: true,
+          });
+          result = {
+            success: true,
+            duplicado: true,
+            numero: recentTicket.numero,
+            aviso: `JÁ EXISTE o chamado #${recentTicket.numero} aberto há menos de 30 minutos para este cliente ("${recentTicket.titulo}"). Nenhum chamado novo foi criado — o pedido foi registrado como atualização no chamado existente. Informe o cliente que a solicitação está registrada no chamado #${recentTicket.numero} e NÃO tente criar outro chamado.`,
+          };
+          console.log(`create_ticket dedupe: reused #${recentTicket.numero} for ${phone}`);
+          break;
+        }
+
         const { data: ticket, error } = await supabase
           .from("tickets")
           .insert({
@@ -1151,7 +1373,7 @@ async function handleToolCalls(supabase: any, toolCalls: any[], phone: string, c
 
           // Notify technician via WhatsApp
           try {
-            const companyName = context.contact?.company?.nome_fantasia || "Empresa não identificada";
+            const companyName = context.contact?.companies?.nome_fantasia || "Empresa não identificada";
             const notifMsg = `🔔 *Novo Chamado #${ticket.numero}*\n\n` +
               `📋 *Título:* ${args.titulo}\n` +
               `🏢 *Empresa:* ${companyName}\n` +
@@ -1162,24 +1384,8 @@ async function handleToolCalls(supabase: any, toolCalls: any[], phone: string, c
               `📝 *Descrição:*\n${args.descricao}${osInfo}\n\n` +
               `${args.asset_id ? `🖥️ *Ativo vinculado:* Sim` : `🖥️ *Ativo:* Não vinculado`}`;
 
-            const MABBIX_URL = Deno.env.get("MABBIX_BACKEND_URL")?.replace("//chat.mabbix.com.br", "//apichat.mabbix.com.br");
-            const MABBIX_TOKEN = Deno.env.get("MABBIX_CONNECTION_TOKEN");
-            if (MABBIX_URL && MABBIX_TOKEN) {
-              await fetch(`${MABBIX_URL}/api/messages/send`, {
-                method: "POST",
-                headers: {
-                  "Content-Type": "application/json",
-                  Authorization: `Bearer ${MABBIX_TOKEN}`,
-                },
-                body: JSON.stringify({
-                  number: TECNICO_PHONE,
-                  body: notifMsg,
-                  openTicket: "0",
-                  queueId: "0",
-                }),
-              });
-              console.log(`WhatsApp notification sent to technician ${TECNICO_PHONE}`);
-            }
+            await sendWabaText(TECNICO_PHONE, notifMsg, { openTicket: false });
+            console.log(`WhatsApp notification sent to technician ${TECNICO_PHONE}`);
           } catch (notifErr) {
             console.error("Failed to notify technician:", notifErr);
           }
@@ -1415,7 +1621,7 @@ async function handleToolCalls(supabase: any, toolCalls: any[], phone: string, c
 
         // === NOTIFICAÇÕES AO ESCALONAR ===
         const escalateContactName = context.contact?.contact_name || phone;
-        const escalateCompanyName = context.contact?.company?.nome_fantasia || "Não identificada";
+        const escalateCompanyName = context.contact?.companies?.nome_fantasia || "Não identificada";
 
         // 1. Push notification para admins e técnicos
         try {
@@ -1464,32 +1670,16 @@ async function handleToolCalls(supabase: any, toolCalls: any[], phone: string, c
         // 2. WhatsApp notification para técnico via Mabbix
         try {
           const TECNICO_PHONE_ESCALATE = "5562999522470";
-          const MABBIX_URL = Deno.env.get("MABBIX_BACKEND_URL")?.replace("//chat.mabbix.com.br", "//apichat.mabbix.com.br");
-          const MABBIX_TOKEN = Deno.env.get("MABBIX_CONNECTION_TOKEN");
-          if (MABBIX_URL && MABBIX_TOKEN) {
-            const escalateMsg = `🚨 *Transferência de Atendimento*\n\n` +
-              `👤 *Cliente:* ${escalateContactName}\n` +
-              `📞 *Telefone:* ${phone}\n` +
-              `🏢 *Empresa:* ${escalateCompanyName}\n\n` +
-              `📋 *Motivo:* ${args.reason}\n\n` +
-              `📝 *Resumo da IA:*\n${args.resumo}\n\n` +
-              `⚡ Acesse a plataforma WhatsApp para atender este cliente.`;
+          const escalateMsg = `🚨 *Transferência de Atendimento*\n\n` +
+            `👤 *Cliente:* ${escalateContactName}\n` +
+            `📞 *Telefone:* ${phone}\n` +
+            `🏢 *Empresa:* ${escalateCompanyName}\n\n` +
+            `📋 *Motivo:* ${args.reason}\n\n` +
+            `📝 *Resumo da IA:*\n${args.resumo}\n\n` +
+            `⚡ Acesse a plataforma WhatsApp para atender este cliente.`;
 
-            await fetch(`${MABBIX_URL}/api/messages/send`, {
-              method: "POST",
-              headers: {
-                "Content-Type": "application/json",
-                Authorization: `Bearer ${MABBIX_TOKEN}`,
-              },
-              body: JSON.stringify({
-                number: TECNICO_PHONE_ESCALATE,
-                body: escalateMsg,
-                openTicket: "0",
-                queueId: "0",
-              }),
-            });
-            console.log(`WhatsApp escalation notification sent to ${TECNICO_PHONE_ESCALATE}`);
-          }
+          await sendWabaText(TECNICO_PHONE_ESCALATE, escalateMsg, { openTicket: false });
+          console.log(`WhatsApp escalation notification sent to ${TECNICO_PHONE_ESCALATE}`);
         } catch (waMsgErr) {
           console.error("Failed to send WhatsApp escalation notification:", waMsgErr);
         }
@@ -1525,7 +1715,7 @@ async function handleToolCalls(supabase: any, toolCalls: any[], phone: string, c
 
         // Push notification para equipe (partial escalate)
         const partialContactName = context.contact?.contact_name || phone;
-        const partialCompanyName = context.contact?.company?.nome_fantasia || "Não identificada";
+        const partialCompanyName = context.contact?.companies?.nome_fantasia || "Não identificada";
         try {
           await fetch(`${Deno.env.get("SUPABASE_URL")}/functions/v1/send-push-notification`, {
             method: "POST",
@@ -1563,32 +1753,16 @@ async function handleToolCalls(supabase: any, toolCalls: any[], phone: string, c
         // WhatsApp notification to technician for partial escalation
         try {
           const TECNICO_PHONE_PARTIAL = "5562999522470";
-          const MABBIX_URL = Deno.env.get("MABBIX_BACKEND_URL")?.replace("//chat.mabbix.com.br", "//apichat.mabbix.com.br");
-          const MABBIX_TOKEN = Deno.env.get("MABBIX_CONNECTION_TOKEN");
-          if (MABBIX_URL && MABBIX_TOKEN) {
-            const partialMsg = `⚡ *Atenção — Atendimento IA (${args.urgencia?.toUpperCase() || "MEDIA"})*\n\n` +
-              `👤 *Cliente:* ${partialContactName}\n` +
-              `📞 *Telefone:* ${phone}\n` +
-              `🏢 *Empresa:* ${partialCompanyName}\n\n` +
-              `📋 *Motivo:* ${args.reason}\n\n` +
-              `📝 *Resumo:*\n${args.resumo}\n\n` +
-              `🤖 A IA continua ativa como copiloto. Acesse a plataforma se precisar intervir.`;
+          const partialMsg = `⚡ *Atenção — Atendimento IA (${args.urgencia?.toUpperCase() || "MEDIA"})*\n\n` +
+            `👤 *Cliente:* ${partialContactName}\n` +
+            `📞 *Telefone:* ${phone}\n` +
+            `🏢 *Empresa:* ${partialCompanyName}\n\n` +
+            `📋 *Motivo:* ${args.reason}\n\n` +
+            `📝 *Resumo:*\n${args.resumo}\n\n` +
+            `🤖 A IA continua ativa como copiloto. Acesse a plataforma se precisar intervir.`;
 
-            await fetch(`${MABBIX_URL}/api/messages/send`, {
-              method: "POST",
-              headers: {
-                "Content-Type": "application/json",
-                Authorization: `Bearer ${MABBIX_TOKEN}`,
-              },
-              body: JSON.stringify({
-                number: TECNICO_PHONE_PARTIAL,
-                body: partialMsg,
-                openTicket: "0",
-                queueId: "0",
-              }),
-            });
-            console.log(`WhatsApp partial escalation notification sent to ${TECNICO_PHONE_PARTIAL}`);
-          }
+          await sendWabaText(TECNICO_PHONE_PARTIAL, partialMsg, { openTicket: false });
+          console.log(`WhatsApp partial escalation notification sent to ${TECNICO_PHONE_PARTIAL}`);
         } catch (waMsgErr) {
           console.error("Failed to send WhatsApp partial escalation notification:", waMsgErr);
         }
@@ -1822,37 +1996,21 @@ async function handleToolCalls(supabase: any, toolCalls: any[], phone: string, c
             // === NOTIFICAR TÉCNICO via WhatsApp sobre novo agendamento criado pela IA ===
             try {
               const TECNICO_PHONE_SCHED = "5562999522470";
-              const MABBIX_URL = Deno.env.get("MABBIX_BACKEND_URL")?.replace("//chat.mabbix.com.br", "//apichat.mabbix.com.br");
-              const MABBIX_TOKEN = Deno.env.get("MABBIX_CONNECTION_TOKEN");
               const schedContactName = context.contact?.contact_name || phone;
-              const schedCompanyName = context.contact?.company?.nome_fantasia || "Não identificada";
-              if (MABBIX_URL && MABBIX_TOKEN) {
-                const schedMsg = `📅 *Novo Agendamento criado pela IA*\n\n` +
-                  `🆔 *OS:* #${os.numero_os}\n` +
-                  `👤 *Cliente:* ${schedContactName}\n` +
-                  `📞 *Telefone:* ${phone}\n` +
-                  `🏢 *Empresa:* ${schedCompanyName}\n\n` +
-                  `📋 *Título:* ${args.titulo}\n` +
-                  `📝 *Descrição:* ${args.descricao}\n\n` +
-                  `🗓️ *Data:* ${slot.data}\n` +
-                  `⏰ *Horário:* ${slot.hora_inicio} - ${slot.hora_fim}\n` +
-                  `🛠️ *Modalidade:* ${slot.modalidade}`;
+              const schedCompanyName = context.contact?.companies?.nome_fantasia || "Não identificada";
+              const schedMsg = `📅 *Novo Agendamento criado pela IA*\n\n` +
+                `🆔 *OS:* #${os.numero_os}\n` +
+                `👤 *Cliente:* ${schedContactName}\n` +
+                `📞 *Telefone:* ${phone}\n` +
+                `🏢 *Empresa:* ${schedCompanyName}\n\n` +
+                `📋 *Título:* ${args.titulo}\n` +
+                `📝 *Descrição:* ${args.descricao}\n\n` +
+                `🗓️ *Data:* ${slot.data}\n` +
+                `⏰ *Horário:* ${slot.hora_inicio} - ${slot.hora_fim}\n` +
+                `🛠️ *Modalidade:* ${slot.modalidade}`;
 
-                await fetch(`${MABBIX_URL}/api/messages/send`, {
-                  method: "POST",
-                  headers: {
-                    "Content-Type": "application/json",
-                    Authorization: `Bearer ${MABBIX_TOKEN}`,
-                  },
-                  body: JSON.stringify({
-                    number: TECNICO_PHONE_SCHED,
-                    body: schedMsg,
-                    openTicket: "0",
-                    queueId: "0",
-                  }),
-                });
-                console.log(`WhatsApp schedule notification sent to ${TECNICO_PHONE_SCHED}`);
-              }
+              await sendWabaText(TECNICO_PHONE_SCHED, schedMsg, { openTicket: false });
+              console.log(`WhatsApp schedule notification sent to ${TECNICO_PHONE_SCHED}`);
             } catch (schedNotifErr) {
               console.error("Failed to notify technician about new schedule:", schedNotifErr);
             }
@@ -1946,50 +2104,54 @@ async function handleToolCalls(supabase: any, toolCalls: any[], phone: string, c
 // ─── Notifica o técnico (José) via WhatsApp ──────────────────────────
 async function notifyTechnician(text: string) {
   try {
-    const MABBIX_URL = Deno.env.get("MABBIX_BACKEND_URL")?.replace("//chat.mabbix.com.br", "//apichat.mabbix.com.br");
-    const MABBIX_TOKEN = Deno.env.get("MABBIX_CONNECTION_TOKEN");
-    if (!MABBIX_URL || !MABBIX_TOKEN) return;
-    await fetch(`${MABBIX_URL}/api/messages/send`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${MABBIX_TOKEN}` },
-      body: JSON.stringify({ number: "5562999522470", body: text, openTicket: "0", queueId: "0" }),
-    });
+    await sendWabaText("5562999522470", text, { openTicket: false });
   } catch (e) {
     console.error("notifyTechnician failed:", e);
   }
 }
 
-// ─── Send & Save Reply via Mabbix ────────────────────────────────────
+// ─── Send & Save Reply (Mabbix ou Evolution, conforme WABA_PROVIDER) ──
 
 async function sendAndSaveReply(
   supabase: any,
   conversationId: string,
   phone: string,
-  text: string,
-  mabbixUrl: string,
-  mabbixToken: string
+  text: string
 ) {
-  const response = await fetch(`${mabbixUrl}/api/messages/send`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${mabbixToken}`,
-    },
-    body: JSON.stringify({
-      number: phone,
-      openTicket: "0",
-      queueId: "0",
-      body: text,
-    }),
-  });
+  // Trava anti-corrida: entre o check inicial de ai_enabled e este envio
+  // passam 10-30s (transcrição + GPT + tools). Se o técnico assumiu a
+  // conversa nesse meio-tempo (ai_enabled já virou false, ou a última
+  // mensagem é dele), a IA desiste em silêncio em vez de atropelar.
+  const { data: convNow } = await supabase
+    .from("waba_conversations")
+    .select("ai_enabled")
+    .eq("id", conversationId)
+    .single();
+  if (!convNow?.ai_enabled) {
+    console.log("Send aborted: AI was disabled during processing", conversationId);
+    return;
+  }
+  const { data: lastMsg } = await supabase
+    .from("waba_messages")
+    .select("direction, sender_type")
+    .eq("conversation_id", conversationId)
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (
+    lastMsg?.direction === "outbound" &&
+    (lastMsg.sender_type === "phone" || lastMsg.sender_type === "agent")
+  ) {
+    console.log("Send aborted: technician already replied in this conversation", conversationId);
+    return;
+  }
 
-  const result = await response.json();
-  console.log("AI reply sent via Mabbix:", JSON.stringify(result).substring(0, 200));
+  const result = await sendWabaText(phone, text, { openTicket: false });
+  console.log("AI reply sent via WABA:", JSON.stringify(result.raw).substring(0, 200));
 
-  const messageId = result?.id || result?.message?.id || null;
   await supabase.from("waba_messages").insert({
     conversation_id: conversationId,
-    wamid: messageId ? String(messageId) : null,
+    wamid: result.providerMessageId,
     direction: "outbound",
     message_type: "text",
     content: text,
@@ -2088,15 +2250,13 @@ async function transcribeAudio(mediaUrl: string, apiKey: string): Promise<string
   }
 }
 
-// ─── Send Audio Reply via OpenAI (TTS) + Mabbix ────
+// ─── Send Audio Reply via OpenAI (TTS) + WABA (Mabbix ou Evolution) ────
 
 async function sendAudioReply(
   supabase: any,
   conversationId: string,
   phone: string,
-  text: string,
-  mabbixUrl: string,
-  mabbixToken: string
+  text: string
 ) {
   try {
     const OPENAI_API_KEY = Deno.env.get("OPENAI_API_KEY");
@@ -2157,30 +2317,15 @@ async function sendAudioReply(
 
     console.log(`TTS audio generated via OpenAI`);
 
-    // Send audio via Mabbix (base64 audio)
-    const sendResponse = await fetch(`${mabbixUrl}/api/messages/send`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${mabbixToken}`,
-      },
-      body: JSON.stringify({
-        number: phone,
-        openTicket: "0",
-        queueId: "0",
-        body: `data:audio/mp3;base64,${audioContent}`,
-        isAudio: true,
-      }),
-    });
-
-    const sendResult = await sendResponse.json();
-    console.log("Audio reply sent via Mabbix:", JSON.stringify(sendResult).substring(0, 200));
+    // Envia o audio via WABA (Mabbix mantem o formato data-URI de sempre;
+    // sendWabaAudio normaliza para base64 puro quando o provedor e Evolution)
+    const sendResult = await sendWabaAudio(phone, `data:audio/mp3;base64,${audioContent}`);
+    console.log("Audio reply sent via WABA:", JSON.stringify(sendResult.raw).substring(0, 200));
 
     // Save audio message to DB
-    const messageId = sendResult?.id || sendResult?.message?.id || null;
     await supabase.from("waba_messages").insert({
       conversation_id: conversationId,
-      wamid: messageId ? String(messageId) : null,
+      wamid: sendResult.providerMessageId,
       direction: "outbound",
       message_type: "audio",
       content: `[Áudio] ${text.substring(0, 200)}`,
