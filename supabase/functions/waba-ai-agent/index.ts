@@ -219,6 +219,30 @@ serve(async (req: Request) => {
       }
     }
 
+    // ─── Teste em modo sombra (Claude) ────────────────────────────────
+    // Dispara em paralelo, sem bloquear nem afetar a resposta real ao
+    // cliente (fire-and-forget; qualquer falha é só logada). Só roda de
+    // fato se AI_SHADOW_CLAUDE_ENABLED=true E a secret ANTHROPIC_API_KEY
+    // existir (a própria function faz no-op sem a chave).
+    if ((Deno.env.get("AI_SHADOW_CLAUDE_ENABLED") || "").toLowerCase() === "true") {
+      const shadowCall = fetch(`${Deno.env.get("SUPABASE_URL")}/functions/v1/waba-ai-shadow-claude`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")}`,
+        },
+        body: JSON.stringify({
+          conversation_id,
+          message_id,
+          company_id: context.companyId || null,
+          system_prompt: systemPrompt,
+          chat_history: chatHistory,
+        }),
+      }).catch((e) => console.error("Shadow Claude dispatch failed (non-blocking):", e));
+      // @ts-ignore — EdgeRuntime é global do runtime do Supabase, sem tipos no editor
+      if (typeof EdgeRuntime !== "undefined") EdgeRuntime.waitUntil(shadowCall);
+    }
+
     // Call AI with upgraded model
     const aiResponse = await fetch(AI_GATEWAY_URL, {
       method: "POST",
