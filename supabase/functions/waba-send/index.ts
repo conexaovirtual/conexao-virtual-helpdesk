@@ -67,12 +67,13 @@ serve(async (req: Request) => {
       }
 
       case "send_media": {
-        const { phone, media_url, filename, caption, media_type, conversation_id, open_ticket } = params;
+        const { phone, media_url, filename, caption, media_type, mime_type, conversation_id, open_ticket } = params;
 
         const result = await sendWabaMedia(phone, media_url, {
           filename,
           caption,
           mediaType: media_type,
+          mimeType: mime_type,
           openTicket: !!open_ticket,
         });
         console.log("WABA send_media response:", JSON.stringify(result.raw).substring(0, 400));

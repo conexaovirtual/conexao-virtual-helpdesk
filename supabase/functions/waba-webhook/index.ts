@@ -1,4 +1,5 @@
 import { serve } from "https://deno.land/std@0.190.0/http/server.ts";
+import { decode as decodeBase64 } from "https://deno.land/std@0.190.0/encoding/base64.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { sendWabaText, getWabaMediaBase64, getGroupInfo } from "../_shared/waba-provider.ts";
 
@@ -112,7 +113,7 @@ serve(async (req: Request) => {
               content: m.text || m.body || "",
               messageType: m.type || detectMessageType(m.mediaType, m.fileUrl),
               mediaUrl: m.fileUrl || m.mediaUrl || null,
-              wamid: m.wid || (body.chamadoId ? `outecho_${body.chamadoId}_${i}` : `outecho_${payloadHash}_${i}`),
+              wamid: m.wid || arrayMessageWamid("outecho", body, payloadHash, i),
               rawPayload: body,
             });
           }
@@ -136,10 +137,7 @@ serve(async (req: Request) => {
         const content = msgItem.text || msgItem.body || "[Mensagem sem texto]";
         const messageType = msgItem.type || "text";
         const mediaUrl = msgItem.fileUrl || null;
-        // Deterministic wamid: chamadoId + index (NOT Date.now() which varies between parallel requests)
-        const wamid = body.chamadoId
-          ? `mabbix_${body.chamadoId}_${i}`
-          : `mabbix_${payloadHash}_${i}`;
+        const wamid = arrayMessageWamid("mabbix", body, payloadHash, i);
 
         await saveInboundMessage(supabase, {
           phoneNumber,
@@ -172,6 +170,21 @@ function okResponse() {
     status: 200,
     headers: { "Content-Type": "application/json", ...corsHeaders },
   });
+}
+
+// O payload em formato array não traz um id por mensagem (Mabbix não manda
+// wid aqui), e chamadoId é o ID do TICKET — fica igual em toda mensagem
+// enquanto o ticket segue aberto. Usar só `chamadoId_index` fazia toda
+// mensagem seguinte do mesmo ticket colidir com o wamid da primeira e ser
+// descartada pelo dedupe (silenciosa, sem log distinguível de duplicata
+// real). ticketData.updatedAt muda a cada mensagem nova do ticket — usamos
+// ele como discriminador real; payloadHash cobre o caso raro de faltar.
+function arrayMessageWamid(prefix: string, body: any, payloadHash: string, index: number): string {
+  const chamadoId = body?.chamadoId;
+  const updatedAt = body?.ticketData?.updatedAt;
+  if (chamadoId && updatedAt) return `${prefix}_${chamadoId}_${updatedAt}_${index}`;
+  if (chamadoId) return `${prefix}_${chamadoId}_${payloadHash}_${index}`;
+  return `${prefix}_${payloadHash}_${index}`;
 }
 
 function extractPhone(raw: string): string {
@@ -234,7 +247,12 @@ async function uploadEvolutionMediaToStorage(supabase: any, messageId: string): 
   try {
     const media = await getWabaMediaBase64(messageId);
     if (!media) return null;
-    const bytes = Uint8Array.from(atob(media.base64), (c) => c.charCodeAt(0));
+    // decodeBase64 (Deno std) em vez de atob()+Uint8Array.from(...,charCodeAt)
+    // — a versao char-a-char e lenta/pesada o suficiente em midia grande
+    // (video, documento) pra estourar o limite de CPU do isolate do Supabase
+    // Edge Functions e matar a invocação inteira com um status não-padrão
+    // (546, visto em produção) — a mensagem nunca chegava a ser salva.
+    const bytes = decodeBase64(media.base64);
     const ext = media.mimetype.split(";")[0].split("/")[1] || "bin";
     const path = `evolution/${messageId}.${ext}`;
     const { error } = await supabase.storage
@@ -248,6 +266,25 @@ async function uploadEvolutionMediaToStorage(supabase: any, messageId: string): 
     return data?.publicUrl || null;
   } catch (err) {
     console.error("uploadEvolutionMediaToStorage error:", err);
+    return null;
+  }
+}
+
+// Nunca deixa o download/upload de mídia travar a mensagem inteira: se não
+// terminar em 12s (ou der qualquer erro), segue sem mídia — o texto/legenda
+// ainda é salvo. Preferível a perder a mensagem inteira por causa de um
+// arquivo grande ou lento.
+async function withMediaTimeout(promise: Promise<string | null>, messageId: string): Promise<string | null> {
+  const timeout = new Promise<null>((resolve) =>
+    setTimeout(() => {
+      console.error(`Media processing timeout for ${messageId} — seguindo sem mídia`);
+      resolve(null);
+    }, 12000)
+  );
+  try {
+    return await Promise.race([promise, timeout]);
+  } catch (err) {
+    console.error("withMediaTimeout error:", err);
     return null;
   }
 }
@@ -296,7 +333,7 @@ async function handleEvolutionWebhook(supabase: any, body: any, payloadHash: str
   // Eco de mensagem enviada pelo proprio celular (fromMe) — mesmo tratamento
   // do caminho Mabbix: salva como outbound e verifica handover pra humano.
   if (key.fromMe === true) {
-    const mediaUrl = needsMedia && messageId ? await uploadEvolutionMediaToStorage(supabase, messageId) : null;
+    const mediaUrl = needsMedia && messageId ? await withMediaTimeout(uploadEvolutionMediaToStorage(supabase, messageId), messageId) : null;
     await saveOutboundMessage(supabase, {
       phoneNumber,
       contactName: data.pushName,
@@ -310,7 +347,7 @@ async function handleEvolutionWebhook(supabase: any, body: any, payloadHash: str
     return okResponse();
   }
 
-  const mediaUrl = needsMedia && messageId ? await uploadEvolutionMediaToStorage(supabase, messageId) : null;
+  const mediaUrl = needsMedia && messageId ? await withMediaTimeout(uploadEvolutionMediaToStorage(supabase, messageId), messageId) : null;
 
   await saveInboundMessage(supabase, {
     phoneNumber,
@@ -462,7 +499,10 @@ async function saveInboundMessage(supabase: any, data: InboundMessageData) {
   // Cross-format dedup: Mabbix delivers the same WhatsApp message in separate
   // webhook events (acao "start" + "from_internal") with unrelated wamids, so
   // also skip when identical inbound content just arrived in this conversation.
-  const dedupWindowStart = new Date(Date.now() - 2 * 60 * 1000).toISOString();
+  // Janela curta (20s, não 2min): a duplicata real chega em ~1s; uma janela
+  // longa descartava mensagens genuinamente repetidas minutos depois (ex.:
+  // cliente manda "oi" ou "1" de novo) como se fossem a mesma duplicata.
+  const dedupWindowStart = new Date(Date.now() - 20 * 1000).toISOString();
   const { data: contentDup } = await supabase
     .from("waba_messages")
     .select("id")
@@ -691,7 +731,9 @@ async function saveOutboundMessage(supabase: any, data: {
   if (!conversationId) { console.error("Outbound: sem conversa para", phoneNumber); return; }
 
   // Dedup por conteúdo outbound recente (eco de envio da plataforma/IA → já gravado)
-  const dedupWindowStart = new Date(Date.now() - 2 * 60 * 1000).toISOString();
+  // Janela curta (20s) pelo mesmo motivo do dedupe inbound: evita descartar um
+  // envio manual repetido minutos depois como se fosse eco da própria plataforma.
+  const dedupWindowStart = new Date(Date.now() - 20 * 1000).toISOString();
   const { data: contentDup } = await supabase
     .from("waba_messages").select("id")
     .eq("conversation_id", conversationId).eq("direction", "outbound").eq("content", content)

@@ -81,16 +81,21 @@ export async function sendWabaText(
 export async function sendWabaMedia(
   phone: string,
   mediaUrl: string,
-  opts: { filename?: string; caption?: string; mediaType?: string; openTicket?: boolean }
+  opts: { filename?: string; caption?: string; mediaType?: string; mimeType?: string; openTicket?: boolean }
 ): Promise<SendResult> {
   if (getWabaProvider() === "evolution") {
     const { url, key, instance } = evolutionConfig();
     // Evolution aceita tanto URL quanto base64 no campo `media`; URL e mais
     // simples e evita um download+reupload aqui.
+    // "audio" faltava aqui — caia em "document", e a Evolution/WhatsApp
+    // rejeitava (mediatype documento não bate com um arquivo de áudio),
+    // por isso não dava pra mandar áudio anexado pela plataforma.
     const mediatype = opts.mediaType?.startsWith("image")
       ? "image"
       : opts.mediaType?.startsWith("video")
       ? "video"
+      : opts.mediaType?.startsWith("audio")
+      ? "audio"
       : "document";
     const resp = await fetch(`${url}/message/sendMedia/${instance}`, {
       method: "POST",
@@ -98,7 +103,9 @@ export async function sendWabaMedia(
       body: JSON.stringify({
         number: phone,
         mediatype,
-        mimetype: opts.mediaType || "application/octet-stream",
+        // mimetype real (ex: "audio/mpeg") — antes mandava só a categoria
+        // curta ("audio"/"image"), que não é um mimetype válido.
+        mimetype: opts.mimeType || opts.mediaType || "application/octet-stream",
         media: mediaUrl,
         fileName: opts.filename || "arquivo",
         caption: opts.caption || "",
