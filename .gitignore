@@ -26,3 +26,12 @@ scripts/.backup.env
 *.njsproj
 *.sln
 *.sw?
+
+# Segredos locais (NUNCA versionar)
+.env
+
+# Artefatos temporários do Supabase CLI
+supabase/.temp/
+
+# Lovable descontinuado
+.lovable/
