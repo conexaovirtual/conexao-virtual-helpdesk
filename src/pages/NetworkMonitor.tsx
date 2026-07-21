@@ -199,7 +199,7 @@ export default function NetworkMonitor() {
           <CardContent className="flex flex-col items-center justify-center py-12 text-muted-foreground">
             <Wifi className="h-12 w-12 mb-3 opacity-30" />
             <p className="text-lg font-medium">Nenhum dispositivo monitorado encontrado</p>
-            <p className="text-sm">Dispositivos com agente Datto RMM aparecerão aqui automaticamente.</p>
+            <p className="text-sm">Dispositivos com agente NexoRMM aparecerão aqui automaticamente.</p>
             <p className="text-xs mt-2">Total de assets no filtro: {assets.length}</p>
           </CardContent>
         </Card>

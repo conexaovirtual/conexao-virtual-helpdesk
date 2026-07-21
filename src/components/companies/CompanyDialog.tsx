@@ -6,7 +6,7 @@ import { useToast } from '@/hooks/use-toast';
 import { companySchema, type CompanyFormData } from '@/lib/validations';
 import { formatCNPJ, formatPhone } from '@/lib/formatters';
 import { useCNPJLookup } from '@/hooks/useCNPJLookup';
-import { useGeolocation } from '@/hooks/useGeolocation';
+import { geocodeByAddress } from '@/lib/geocodeAddress';
 import { GeolocationCapture } from '@/components/ui/GeolocationCapture';
 import { Search, Loader2, CheckCircle2, AlertCircle, RotateCw, Upload, X, Edit } from 'lucide-react';
 import { ImageUpload } from '@/components/ui/ImageUpload';
@@ -40,7 +40,8 @@ interface CompanyDialogProps {
 export function CompanyDialog({ open, onOpenChange, company, onSuccess }: CompanyDialogProps) {
   const { toast } = useToast();
   const { lookupCNPJ, isLoading: isLoadingCNPJ, error, isRateLimitError } = useCNPJLookup();
-  const { position: geoPosition, loading: geoLoading, error: geoError, captureLocation } = useGeolocation();
+  const [geoLoading, setGeoLoading] = useState(false);
+  const [geoError, setGeoError] = useState<string | null>(null);
   const [cnpjValidated, setCnpjValidated] = useState(false);
   const [companySituation, setCompanySituation] = useState<'ativa' | 'baixada' | null>(null);
   const [logoUrl, setLogoUrl] = useState<string | null>(null);
@@ -276,6 +277,21 @@ export function CompanyDialog({ open, onOpenChange, company, onSuccess }: Compan
           .eq('id', company.id);
 
         if (error) throw error;
+
+        // A localização é travada por trigger no banco (fn_lock_company_geo):
+        // o UPDATE acima descarta lat/lng. O único caminho sancionado para
+        // alterar a geo de uma empresa existente é a RPC set_company_location.
+        const geoMudou =
+          companyLatitude !== (company.latitude ?? null) ||
+          companyLongitude !== (company.longitude ?? null);
+        if (geoMudou) {
+          const { error: geoError } = await supabase.rpc('set_company_location', {
+            p_company_id: company.id,
+            p_lat: companyLatitude,
+            p_lng: companyLongitude,
+          });
+          if (geoError) throw geoError;
+        }
 
         toast({
           title: 'Empresa atualizada',
@@ -633,7 +649,10 @@ export function CompanyDialog({ open, onOpenChange, company, onSuccess }: Compan
 
               <div className="md:col-span-2">
                 <GeolocationCapture
-                  label="Localização GPS da Empresa"
+                  label="Localização da Empresa (pelo endereço)"
+                  captureLabel="Buscar pelo endereço"
+                  recaptureLabel="Atualizar pelo endereço"
+                  loadingLabel="Buscando..."
                   position={companyLatitude && companyLongitude ? {
                     latitude: companyLatitude,
                     longitude: companyLongitude,
@@ -642,10 +661,26 @@ export function CompanyDialog({ open, onOpenChange, company, onSuccess }: Compan
                   loading={geoLoading}
                   error={geoError}
                   onCapture={async () => {
-                    const pos = await captureLocation();
-                    if (pos) {
-                      setCompanyLatitude(pos.latitude);
-                      setCompanyLongitude(pos.longitude);
+                    const endereco = form.getValues('endereco');
+                    if (!endereco || !endereco.trim()) {
+                      setGeoError('Preencha o endereço antes de buscar a localização.');
+                      return;
+                    }
+                    setGeoLoading(true);
+                    setGeoError(null);
+                    const result = await geocodeByAddress(endereco);
+                    setGeoLoading(false);
+                    if (result) {
+                      setCompanyLatitude(result.latitude);
+                      setCompanyLongitude(result.longitude);
+                      toast({
+                        title: '📍 Localização encontrada',
+                        description: result.fonte === 'cep'
+                          ? 'Coordenadas obtidas pelo CEP do endereço.'
+                          : 'Coordenadas obtidas pelo endereço.',
+                      });
+                    } else {
+                      setGeoError('Não foi possível localizar pelo endereço. Verifique o CEP/endereço.');
                     }
                   }}
                 />
@@ -728,7 +763,7 @@ export function CompanyDialog({ open, onOpenChange, company, onSuccess }: Compan
 
 
               <div className="md:col-span-2">
-                <label className="text-sm font-medium">Datto RMM Site ID</label>
+                <label className="text-sm font-medium">NexoRMM Site ID</label>
                 <Input
                   value={dattoSiteId}
                   onChange={(e) => setDattoSiteId(e.target.value)}
@@ -736,7 +771,7 @@ export function CompanyDialog({ open, onOpenChange, company, onSuccess }: Compan
                   className="mt-1.5"
                 />
                 <p className="text-xs text-muted-foreground mt-1">
-                  Vincula esta empresa a um Site específico do Datto RMM para sincronização precisa
+                  Vincula esta empresa a um Site específico do NexoRMM para sincronização precisa
                 </p>
               </div>
 

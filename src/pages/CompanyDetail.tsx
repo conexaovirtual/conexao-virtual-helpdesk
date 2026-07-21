@@ -13,6 +13,7 @@ import { CompanyTickets } from '@/components/companies/CompanyTickets';
 import { CompanyAssets } from '@/components/companies/CompanyAssets';
 import { CompanyTechnicians } from '@/components/companies/CompanyTechnicians';
 import { CompanyWhatsAppContacts } from '@/components/companies/CompanyWhatsAppContacts';
+import { CompanyContacts } from '@/components/companies/CompanyContacts';
 import { useToast } from '@/hooks/use-toast';
 
 export default function CompanyDetail() {
@@ -203,10 +204,11 @@ export default function CompanyDetail() {
       {/* Conteúdo com Abas */}
       <main className="container mx-auto px-4 py-6">
         <Tabs defaultValue="overview" className="space-y-6">
-          <TabsList className="grid w-full grid-cols-5 lg:w-[750px]">
+          <TabsList className="grid w-full grid-cols-6 lg:w-[900px]">
             <TabsTrigger value="overview">Visão Geral</TabsTrigger>
             <TabsTrigger value="tickets">Tickets</TabsTrigger>
             <TabsTrigger value="assets">Ativos</TabsTrigger>
+            <TabsTrigger value="contacts">Contatos</TabsTrigger>
             <TabsTrigger value="whatsapp">
               <MessageSquare className="h-4 w-4 mr-1" />
               WhatsApp
@@ -389,6 +391,15 @@ export default function CompanyDetail() {
               </CardHeader>
               <CardContent>
                 <CompanyAssets companyId={id!} />
+              </CardContent>
+            </Card>
+          </TabsContent>
+
+          {/* Aba Contatos */}
+          <TabsContent value="contacts">
+            <Card>
+              <CardContent className="pt-6">
+                <CompanyContacts companyId={id!} />
               </CardContent>
             </Card>
           </TabsContent>

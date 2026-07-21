@@ -27,14 +27,22 @@ export function MetricsDashboard() {
   });
 
   useEffect(() => {
-    const load = async () => {
-      const [convResult, msgResult] = await Promise.all([
-        supabase.from("waba_conversations").select("status, ai_enabled, queue_status, first_response_at, created_at"),
-        supabase.from("waba_messages").select("sender_type, direction"),
-      ]);
+    // PostgREST caps selects at 1000 rows; page through everything.
+    const fetchAll = async (table: "waba_conversations" | "waba_messages", columns: string) => {
+      const all: any[] = [];
+      for (let from = 0; ; from += 1000) {
+        const { data } = await supabase.from(table).select(columns).range(from, from + 999);
+        if (data) all.push(...data);
+        if (!data || data.length < 1000) break;
+      }
+      return all;
+    };
 
-      const convs = convResult.data || [];
-      const msgs = msgResult.data || [];
+    const load = async () => {
+      const [convs, msgs] = await Promise.all([
+        fetchAll("waba_conversations", "status, ai_enabled, queue_status, first_response_at, created_at"),
+        fetchAll("waba_messages", "sender_type, direction"),
+      ]);
 
       // Calculate avg first response time
       const responseTimes = convs

@@ -10,9 +10,7 @@ import { ArrowLeft, Clock, User, Package, AlertCircle, PlayCircle, Calendar as C
 import { format } from 'date-fns';
 import { ptBR } from 'date-fns/locale';
 import { TicketTimeline } from '@/components/tickets/TicketTimeline';
-import { TicketComments } from '@/components/tickets/TicketComments';
 import { TicketStatusUpdate } from '@/components/tickets/TicketStatusUpdate';
-import { TicketAssignment } from '@/components/tickets/TicketAssignment';
 import { ServiceOrderDialog } from '@/components/service-orders/ServiceOrderDialog';
 import { FileText } from 'lucide-react';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
@@ -22,8 +20,6 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { Calendar } from '@/components/ui/calendar';
 import { toast } from 'sonner';
-import { AITriageCard } from '@/components/ai/AITriageCard';
-import { AIDiagnosticButton } from '@/components/ai/AIDiagnosticButton';
 
 export default function TicketDetail() {
   const { id } = useParams();
@@ -78,7 +74,7 @@ export default function TicketDetail() {
       .from('tickets')
       .select(`
         *,
-        companies:company_id(nome_fantasia),
+        companies:company_id(id, nome_fantasia, cnpj, whatsapp, telefone, bomcontrole_cliente_id),
         categories:category_id(nome, cor),
         subcategories:subcategory_id(nome),
         assets:asset_id(tipo, tag_patrimonial, numero_serie, fabricante, modelo),
@@ -130,8 +126,9 @@ export default function TicketDetail() {
   }
 
   const canManage = profile?.roles?.some(r => ['admin_provedor', 'tecnico', 'gestor_cliente'].includes(r)) || false;
-  const canViewFinancials = profile?.roles?.some(r => ['admin_provedor', 'gestor_cliente'].includes(r)) || false;
-  const canOpenService = canManage && ['novo', 'triagem'].includes(ticket?.status);
+  // atender/agendar disponível enquanto o chamado estiver aberto (antes só novo/triagem,
+  // o que escondia o botão justamente nos chamados em atendimento)
+  const canOpenService = canManage && !['resolvido', 'fechado', 'cancelado'].includes(ticket?.status);
 
   const handleOpenActionDialog = (type: 'immediate' | 'schedule') => {
     setActionType(type);
@@ -241,6 +238,16 @@ export default function TicketDetail() {
     }
   };
 
+  // descrições vindas de automações (NexoRMM etc.) usam **negrito** markdown;
+  // renderiza o negrito de verdade em vez de mostrar os asteriscos
+  const renderRich = (text: string) => {
+    const escaped = (text || '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;');
+    return { __html: escaped.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>') };
+  };
+
   const getSLAStatus = () => {
     if (!ticket.sla_solucao_limite) return null;
     
@@ -295,7 +302,7 @@ export default function TicketDetail() {
                   <CardTitle>Descrição</CardTitle>
                 </CardHeader>
                 <CardContent>
-                  <p className="whitespace-pre-wrap">{ticket.descricao}</p>
+                  <p className="whitespace-pre-wrap" dangerouslySetInnerHTML={renderRich(ticket.descricao)} />
                 </CardContent>
               </Card>
 
@@ -305,34 +312,15 @@ export default function TicketDetail() {
                     <CardTitle>Solução</CardTitle>
                   </CardHeader>
                   <CardContent>
-                    <p className="whitespace-pre-wrap">{ticket.solucao}</p>
+                    <p className="whitespace-pre-wrap" dangerouslySetInnerHTML={renderRich(ticket.solucao)} />
                   </CardContent>
                 </Card>
               )}
 
               <TicketTimeline ticketId={ticket.id} />
-              <TicketComments ticketId={ticket.id} />
             </div>
 
             <div className="space-y-4">
-              {/* AI Triage Card for new tickets */}
-              {canManage && ['novo', 'triagem'].includes(ticket?.status) && (
-                <AITriageCard ticket={ticket} onApplySuggestion={loadTicket} />
-              )}
-
-              {/* AI Diagnostic Button for tickets in progress */}
-              {canManage && ticket?.status === 'em_atendimento' && (
-                <AIDiagnosticButton 
-                  contexto={{
-                    ticket_id: ticket.id,
-                    asset_id: ticket.asset_id,
-                    descricao_problema: ticket.descricao
-                  }}
-                  variant="outline"
-                  className="w-full"
-                />
-              )}
-
               {canManage && (
                 <>
                   {/* Card para abrir atendimento ou OS quando ticket está novo/triagem */}
@@ -369,17 +357,17 @@ export default function TicketDetail() {
                   )}
 
                   <TicketStatusUpdate ticket={ticket} onUpdate={loadTicket} />
-                  <TicketAssignment ticket={ticket} onUpdate={loadTicket} />
-                  
-                  {(ticket.status === 'resolvido' || ticket.status === 'fechado') && (
+
+                  {ticket.status !== 'cancelado' && (
                     <Card>
                       <CardHeader>
                         <CardTitle className="text-base">Ordem de Serviço</CardTitle>
                       </CardHeader>
                       <CardContent>
-                        <Button 
+                        <Button
                           onClick={() => setIsServiceOrderDialogOpen(true)}
                           className="w-full"
+                          variant="outline"
                         >
                           <FileText className="h-4 w-4 mr-2" />
                           Gerar OS
@@ -524,7 +512,7 @@ export default function TicketDetail() {
                   </SelectTrigger>
                   <SelectContent>
                     <SelectItem value="visita_tecnica">Visita Técnica</SelectItem>
-                    <SelectItem value="acesso_remoto">Acesso Remoto (DATTO)</SelectItem>
+                    <SelectItem value="acesso_remoto">Acesso Remoto (NexoRMM)</SelectItem>
                     <SelectItem value="whatsapp">WhatsApp</SelectItem>
                     <SelectItem value="ligacao">Ligação</SelectItem>
                   </SelectContent>

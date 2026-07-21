@@ -148,36 +148,36 @@ export function DailyServiceRecordCard({ record, onEdit, onView }: DailyServiceR
         
         <CardContent className="space-y-3">
           <div>
-            <h3 className="font-semibold text-lg mb-1">{record.titulo}</h3>
-            <p className="text-sm text-muted-foreground line-clamp-2">
+            <h3 className="font-semibold text-lg mb-1 break-words">{record.titulo}</h3>
+            <p className="text-sm text-muted-foreground line-clamp-2 break-words">
               {record.descricao}
             </p>
           </div>
 
           <div className="space-y-2 text-sm">
             {record.companies && (
-              <div className="flex items-center gap-2 text-muted-foreground">
-                <Building2 className="h-4 w-4" />
-                <span>{record.companies.nome_fantasia}</span>
+              <div className="flex items-center gap-2 text-muted-foreground min-w-0">
+                <Building2 className="h-4 w-4 shrink-0" />
+                <span className="min-w-0 break-words">{record.companies.nome_fantasia}</span>
               </div>
             )}
 
             {record.assets && (
-              <div className="flex items-center gap-2 text-muted-foreground">
-                <Package className="h-4 w-4" />
-                <span>{record.assets.nome} - {record.assets.tipo}{record.assets.tag_patrimonial ? ` (${record.assets.tag_patrimonial})` : ''}</span>
+              <div className="flex items-center gap-2 text-muted-foreground min-w-0">
+                <Package className="h-4 w-4 shrink-0" />
+                <span className="min-w-0 break-words">{record.assets.nome} - {record.assets.tipo}{record.assets.tag_patrimonial ? ` (${record.assets.tag_patrimonial})` : ''}</span>
               </div>
             )}
             {record.profiles && (
-              <div className="flex items-center gap-2 text-muted-foreground">
-                <User className="h-4 w-4" />
-                <span>{record.profiles.nome}</span>
+              <div className="flex items-center gap-2 text-muted-foreground min-w-0">
+                <User className="h-4 w-4 shrink-0" />
+                <span className="min-w-0 break-words">{record.profiles.nome}</span>
               </div>
             )}
 
-            <div className="flex items-center gap-2 text-muted-foreground">
-              <Clock className="h-4 w-4" />
-              <span>
+            <div className="flex items-center gap-2 text-muted-foreground min-w-0">
+              <Clock className="h-4 w-4 shrink-0" />
+              <span className="min-w-0 break-words">
                 {formatDateBR(record.data_atendimento)}
                 {" • "}
                 {record.hora_inicio}

@@ -1,4 +1,5 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { sendWabaText } from "../_shared/waba-provider.ts";
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -21,25 +22,12 @@ interface ServiceOrderRow {
   assets: { nome: string; tipo: string } | null;
 }
 
-// ─── Send WhatsApp via Mabbix ──────────────────────────────────────
+// ─── Send WhatsApp via WABA (Mabbix ou Evolution) ──────────────────
 async function sendWhatsApp(phone: string, text: string) {
-  const MABBIX_BACKEND_URL = Deno.env.get('MABBIX_BACKEND_URL')?.replace('//chat.mabbix.com.br', '//apichat.mabbix.com.br');
-  const MABBIX_CONNECTION_TOKEN = Deno.env.get('MABBIX_CONNECTION_TOKEN');
-  if (!MABBIX_BACKEND_URL || !MABBIX_CONNECTION_TOKEN) {
-    console.warn('Mabbix not configured, skipping WhatsApp');
-    return false;
-  }
   try {
-    const res = await fetch(`${MABBIX_BACKEND_URL}/sendText`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${MABBIX_CONNECTION_TOKEN}`,
-      },
-      body: JSON.stringify({ number: phone, text }),
-    });
-    if (!res.ok) {
-      console.error('WhatsApp send failed:', res.status, await res.text());
+    const result = await sendWabaText(phone, text, { openTicket: false });
+    if (!result.ok) {
+      console.error('WhatsApp send failed:', JSON.stringify(result.raw));
       return false;
     }
     return true;

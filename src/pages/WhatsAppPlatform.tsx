@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/hooks/useAuth";
 import { useNavigate } from "react-router-dom";
@@ -23,21 +23,62 @@ const WhatsAppPlatform = () => {
   const [isConnected, setIsConnected] = useState(true);
   const [activeTab, setActiveTab] = useState<"inbox" | "metrics">("inbox");
   const [syncing, setSyncing] = useState(false);
+  const [unreadIds, setUnreadIds] = useState<Set<string>>(new Set());
+
+  // Ref para ler a conversa aberta dentro da assinatura realtime (evita closure obsoleta)
+  const selectedIdRef = useRef<string | null>(null);
+  useEffect(() => { selectedIdRef.current = selectedConversation?.id || null; }, [selectedConversation]);
+
+  // Toca um bip curto (Web Audio, sem precisar de arquivo)
+  const playBeep = () => {
+    try {
+      const Ctx = (window as any).AudioContext || (window as any).webkitAudioContext;
+      if (!Ctx) return;
+      const ctx = new Ctx();
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.connect(gain); gain.connect(ctx.destination);
+      osc.type = "sine"; osc.frequency.value = 880;
+      gain.gain.setValueAtTime(0.001, ctx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.25, ctx.currentTime + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.35);
+      osc.start(); osc.stop(ctx.currentTime + 0.36);
+      osc.onended = () => ctx.close();
+    } catch { /* silencioso */ }
+  };
+
+  // PostgREST caps selects at 1000 rows; page through everything. Conversations
+  // that never had a message (null last_message_at) go to the bottom.
+  const fetchAllConversations = async (): Promise<Conversation[]> => {
+    const all: Conversation[] = [];
+    for (let from = 0; ; from += 1000) {
+      const { data } = await supabase
+        .from("waba_conversations")
+        .select("*")
+        .order("last_message_at", { ascending: false, nullsFirst: false })
+        .range(from, from + 999);
+      if (data) all.push(...(data as Conversation[]));
+      if (!data || data.length < 1000) break;
+    }
+    return all;
+  };
 
   const syncContacts = async () => {
     setSyncing(true);
     try {
       const { data, error } = await supabase.functions.invoke("sync-whatsapp-contacts");
       if (error) throw error;
-      const syncedCount = data?.synced || 0;
+      const imported = data?.contactsImported || 0;
+      const created = data?.conversationsCreated ?? data?.synced ?? 0;
       const photosCount = data?.photosUpdated || 0;
-      toast.success(`${syncedCount} contatos sincronizados, ${photosCount} fotos atualizadas`);
+      toast.success(
+        `${imported} contatos importados da Mabbix, ${created} conversas novas, ${photosCount} fotos atualizadas`
+      );
+      if (data?.warnings?.length) {
+        toast.warning(data.warnings.join(" "));
+      }
       // Refresh conversations
-      const { data: convs } = await supabase
-        .from("waba_conversations")
-        .select("*")
-        .order("last_message_at", { ascending: false });
-      if (convs) setConversations(convs as Conversation[]);
+      setConversations(await fetchAllConversations());
     } catch (err: any) {
       toast.error("Erro ao sincronizar: " + (err.message || ""));
     }
@@ -53,11 +94,7 @@ const WhatsAppPlatform = () => {
     if (!user) return;
 
     const fetchConversations = async () => {
-      const { data } = await supabase
-        .from("waba_conversations")
-        .select("*")
-        .order("last_message_at", { ascending: false });
-      if (data) setConversations(data as Conversation[]);
+      setConversations(await fetchAllConversations());
     };
 
     fetchConversations();
@@ -87,6 +124,34 @@ const WhatsAppPlatform = () => {
     return () => { supabase.removeChannel(channel); };
   }, [user]);
 
+  // Notificação de mensagens novas (som + não lidas + aviso do navegador)
+  useEffect(() => {
+    if (!user) return;
+    if ("Notification" in window && Notification.permission === "default") {
+      Notification.requestPermission().catch(() => {});
+    }
+
+    const channel = supabase
+      .channel("platform-new-messages")
+      .on("postgres_changes", { event: "INSERT", schema: "public", table: "waba_messages" },
+        (payload) => {
+          const msg = payload.new as any;
+          if (msg.direction !== "inbound") return;               // só mensagens recebidas
+          if (msg.conversation_id === selectedIdRef.current) return; // conversa já aberta
+          playBeep();
+          setUnreadIds((prev) => new Set(prev).add(msg.conversation_id));
+          const preview = (msg.content || "Nova mensagem").toString().slice(0, 60);
+          toast.message("💬 Nova mensagem no WhatsApp", { description: preview });
+          if ("Notification" in window && Notification.permission === "granted") {
+            try { new Notification("Nova mensagem no WhatsApp", { body: preview }); } catch { /* ignore */ }
+          }
+        }
+      )
+      .subscribe();
+
+    return () => { supabase.removeChannel(channel); };
+  }, [user]);
+
   // Quick stats
   const activeCount = conversations.filter(c => c.status === "active").length;
   const waitingCount = conversations.filter(c => c.queue_status === "waiting").length;
@@ -97,6 +162,12 @@ const WhatsAppPlatform = () => {
     setSelectedConversation(conv);
     setActiveTab("inbox");
     setShowInfo(false);
+    setUnreadIds((prev) => {
+      if (!prev.has(conv.id)) return prev;
+      const next = new Set(prev);
+      next.delete(conv.id);
+      return next;
+    });
   };
 
   const handleBack = () => {
@@ -251,6 +322,7 @@ const WhatsAppPlatform = () => {
                 conversations={conversations}
                 selectedId={selectedConversation?.id || null}
                 onSelect={handleSelectConversation}
+                unreadIds={unreadIds}
               />
             </div>
 

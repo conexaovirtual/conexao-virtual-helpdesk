@@ -46,9 +46,8 @@ export function AssetCard({ asset, onEdit, onDelete }: AssetCardProps) {
   const canViewDetails = profile?.roles?.some(r => ['admin_provedor', 'gestor_cliente'].includes(r)) || false;
 
   // Check if we're in preview environment
-  const isPreviewEnv = window.location.hostname.includes('preview') || 
-                       window.location.hostname.includes('localhost') ||
-                       window.location.hostname.includes('lovable.dev');
+  const isPreviewEnv = window.location.hostname.includes('preview') ||
+                       window.location.hostname.includes('localhost');
   
   // Use production URL from env if available, otherwise fall back to origin
   const productionUrl = import.meta.env.VITE_PUBLIC_URL || window.location.origin;

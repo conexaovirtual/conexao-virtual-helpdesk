@@ -111,7 +111,7 @@ export function QuickAssetDialog({ open, onOpenChange, companyId, onSuccess }: Q
           <Alert className="border-info/30 bg-info/5">
             <Info className="h-4 w-4 text-info" />
             <AlertDescription className="text-xs">
-              Este ativo será criado como <strong>Manual</strong> e não será afetado pela sincronização Datto.
+              Este ativo será criado como <strong>Manual</strong> e não será afetado pela sincronização NexoRMM.
             </AlertDescription>
           </Alert>
         </div>

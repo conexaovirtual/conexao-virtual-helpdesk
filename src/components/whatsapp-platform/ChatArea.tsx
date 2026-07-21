@@ -9,9 +9,10 @@ import { Badge } from "@/components/ui/badge";
 import {
   Send, Bot, UserRound, Phone, CheckCheck, Check, Clock,
   MessageSquare, Info, Ticket, ArrowLeft, AlertTriangle, CheckCircle2,
-  Sparkles, Headphones, Shield, Paperclip, Loader2
+  Sparkles, Headphones, Shield, Paperclip, Loader2, Smartphone, Mic, Trash2
 } from "lucide-react";
 import { format } from "date-fns";
+import { ptBR } from "date-fns/locale";
 import { toast } from "sonner";
 import type { Conversation } from "./ConversationList";
 
@@ -40,8 +41,24 @@ export function ChatArea({ conversation, onToggleInfo, showInfo, onBack }: ChatA
   const [newMessage, setNewMessage] = useState("");
   const [sending, setSending] = useState(false);
   const [uploading, setUploading] = useState(false);
+  const [isRecording, setIsRecording] = useState(false);
+  const [recordingSeconds, setRecordingSeconds] = useState(0);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const audioChunksRef = useRef<Blob[]>([]);
+  const mediaStreamRef = useRef<MediaStream | null>(null);
+  const recordingCancelledRef = useRef(false);
+  const recordingTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // Troca de conversa no meio de uma gravação enviaria o áudio pro contato
+  // errado (o closure do onstop guarda a conversa de quando a gravação
+  // começou) — cancela em vez de arriscar isso.
+  useEffect(() => {
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== "inactive") {
+      stopRecording(true);
+    }
+  }, [conversation?.id]);
 
   useEffect(() => {
     if (!conversation) { setMessages([]); return; }
@@ -141,6 +158,7 @@ export function ChatArea({ conversation, onToggleInfo, showInfo, onBack }: ChatA
           filename: file.name,
           caption: newMessage || "",
           media_type: mediaType,
+          mime_type: file.type || undefined,
           conversation_id: conversation.id,
         },
       });
@@ -161,6 +179,123 @@ export function ChatArea({ conversation, onToggleInfo, showInfo, onBack }: ChatA
       setUploading(false);
       if (fileInputRef.current) fileInputRef.current.value = "";
     }
+  };
+
+  const MAX_RECORDING_SECONDS = 5 * 60;
+
+  const stopMediaStream = () => {
+    mediaStreamRef.current?.getTracks().forEach((t) => t.stop());
+    mediaStreamRef.current = null;
+    if (recordingTimerRef.current) {
+      clearInterval(recordingTimerRef.current);
+      recordingTimerRef.current = null;
+    }
+  };
+
+  const startRecording = async () => {
+    if (!conversation || isRecording) return;
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      mediaStreamRef.current = stream;
+      // Opus/ogg é o formato nativo de nota de voz do WhatsApp — preferimos
+      // ele quando o navegador suporta; senão cai pro que o MediaRecorder
+      // oferecer (webm no Chrome, mp4 no Safari).
+      const mimeCandidates = ["audio/ogg;codecs=opus", "audio/webm;codecs=opus", "audio/webm", "audio/mp4"];
+      const mimeType = mimeCandidates.find((m) => MediaRecorder.isTypeSupported(m));
+      const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
+      mediaRecorderRef.current = recorder;
+      audioChunksRef.current = [];
+      recordingCancelledRef.current = false;
+
+      recorder.ondataavailable = (e) => {
+        if (e.data.size > 0) audioChunksRef.current.push(e.data);
+      };
+      recorder.onstop = async () => {
+        stopMediaStream();
+        const wasCancelled = recordingCancelledRef.current;
+        const chunks = audioChunksRef.current;
+        audioChunksRef.current = [];
+        if (wasCancelled || chunks.length === 0) return;
+        await sendRecordedAudio(new Blob(chunks, { type: recorder.mimeType || "audio/webm" }));
+      };
+
+      recorder.start();
+      setIsRecording(true);
+      setRecordingSeconds(0);
+      recordingTimerRef.current = setInterval(() => {
+        setRecordingSeconds((s) => {
+          if (s + 1 >= MAX_RECORDING_SECONDS) {
+            stopRecording(false);
+            return s;
+          }
+          return s + 1;
+        });
+      }, 1000);
+    } catch (err: any) {
+      toast.error("Não foi possível acessar o microfone — verifique a permissão do navegador");
+    }
+  };
+
+  const stopRecording = (cancel: boolean) => {
+    recordingCancelledRef.current = cancel;
+    setIsRecording(false);
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== "inactive") {
+      mediaRecorderRef.current.stop();
+    } else {
+      stopMediaStream();
+    }
+  };
+
+  const sendRecordedAudio = async (blob: Blob) => {
+    if (!conversation) return;
+    setSending(true);
+    try {
+      const audioBase64: string = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onloadend = () => resolve(reader.result as string);
+        reader.onerror = reject;
+        reader.readAsDataURL(blob);
+      });
+
+      const { error } = await supabase.functions.invoke("waba-send", {
+        body: {
+          action: "send_audio",
+          phone: conversation.phone_number,
+          audio_base64: audioBase64,
+          conversation_id: conversation.id,
+        },
+      });
+      if (error) throw error;
+
+      if (conversation.ai_enabled) {
+        await supabase
+          .from("waba_conversations")
+          .update({ ai_enabled: false })
+          .eq("id", conversation.id);
+        toast.success("Áudio enviado — IA desativada");
+      } else {
+        toast.success("Áudio enviado");
+      }
+    } catch (err: any) {
+      toast.error("Erro ao enviar áudio: " + (err.message || ""));
+    } finally {
+      setSending(false);
+    }
+  };
+
+  useEffect(() => {
+    return () => {
+      if (mediaRecorderRef.current && mediaRecorderRef.current.state !== "inactive") {
+        mediaRecorderRef.current.stop();
+      }
+      stopMediaStream();
+    };
+  }, []);
+
+  const formatRecordingTime = (totalSeconds: number) => {
+    const m = Math.floor(totalSeconds / 60).toString().padStart(2, "0");
+    const s = (totalSeconds % 60).toString().padStart(2, "0");
+    return `${m}:${s}`;
   };
 
   const toggleAI = async (enabled: boolean) => {
@@ -242,10 +377,10 @@ export function ChatArea({ conversation, onToggleInfo, showInfo, onBack }: ChatA
 
   return (
     <div className="flex-1 flex flex-col min-w-0" translate="no">
-      {/* Chat Header - Professional Infradesk style */}
-      <div className="h-14 border-b px-3 sm:px-4 flex items-center gap-3 bg-card shrink-0">
+      {/* Chat Header - WhatsApp style */}
+      <div className="h-14 px-3 sm:px-4 flex items-center gap-3 bg-[#008069] dark:bg-[#202c33] shrink-0">
         {onBack && (
-          <Button variant="ghost" size="icon" className="h-8 w-8 md:hidden shrink-0" onClick={onBack}>
+          <Button variant="ghost" size="icon" className="h-8 w-8 md:hidden shrink-0 text-white hover:bg-white/10 hover:text-white" onClick={onBack}>
             <ArrowLeft className="h-4 w-4" />
           </Button>
         )}
@@ -253,34 +388,32 @@ export function ChatArea({ conversation, onToggleInfo, showInfo, onBack }: ChatA
           {conversation.profile_photo_url && (
             <AvatarImage src={conversation.profile_photo_url} alt={conversation.contact_name || conversation.phone_number} />
           )}
-          <AvatarFallback className="bg-gradient-to-br from-primary/20 to-primary/5 text-primary text-sm font-semibold">
+          <AvatarFallback className="bg-white/20 text-white text-sm font-semibold">
             {(conversation.contact_name || conversation.phone_number).slice(0, 2).toUpperCase()}
           </AvatarFallback>
         </Avatar>
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2">
-            <p className="font-semibold text-sm truncate">
+            <p className="font-semibold text-sm truncate text-white">
               {conversation.contact_name || conversation.phone_number}
             </p>
             {conversation.queue_status === "resolved" && (
-              <Badge className="text-[9px] px-1.5 py-0 h-4 bg-emerald-500/10 text-emerald-600 border-emerald-500/30">
+              <Badge className="text-[9px] px-1.5 py-0 h-4 bg-white/15 text-white border-white/20">
                 RESOLVIDO
               </Badge>
             )}
           </div>
-          <p className="text-[11px] text-muted-foreground flex items-center gap-1 truncate">
+          <p className="text-[11px] text-white/70 flex items-center gap-1 truncate">
             <Phone className="h-2.5 w-2.5 shrink-0" />
             <span className="truncate">{conversation.phone_number}</span>
-            <span className="mx-1 text-border">•</span>
-            <span className="text-emerald-600 font-medium">WhatsApp</span>
           </p>
         </div>
         <div className="flex items-center gap-2 shrink-0">
           {conversation.queue_status !== "resolved" && (
             <Button
-              variant="outline"
+              variant="ghost"
               size="sm"
-              className="h-8 text-xs gap-1.5 px-3 border-emerald-200 text-emerald-700 hover:bg-emerald-50 hover:text-emerald-800"
+              className="h-8 text-xs gap-1.5 px-3 text-white hover:bg-white/10 hover:text-white"
               onClick={resolveConversation}
             >
               <CheckCircle2 className="h-3.5 w-3.5" />
@@ -288,15 +421,15 @@ export function ChatArea({ conversation, onToggleInfo, showInfo, onBack }: ChatA
             </Button>
           )}
           {/* AI Toggle */}
-          <div className="flex items-center gap-2 bg-muted/50 rounded-lg px-2.5 py-1.5">
+          <div className="flex items-center gap-2 bg-white/10 rounded-lg px-2.5 py-1.5">
             <Switch
               checked={conversation.ai_enabled}
               onCheckedChange={toggleAI}
               className="scale-90"
             />
             <div className="flex items-center gap-1">
-              <Bot className={`h-3.5 w-3.5 ${conversation.ai_enabled ? "text-primary" : "text-muted-foreground"}`} />
-              <span className={`text-[11px] font-medium hidden sm:inline ${conversation.ai_enabled ? "text-primary" : "text-muted-foreground"}`}>
+              <Bot className="h-3.5 w-3.5 text-white" />
+              <span className="text-[11px] font-medium hidden sm:inline text-white">
                 {conversation.ai_enabled ? "IA ON" : "Manual"}
               </span>
             </div>
@@ -305,21 +438,27 @@ export function ChatArea({ conversation, onToggleInfo, showInfo, onBack }: ChatA
             variant="ghost"
             size="icon"
             onClick={onToggleInfo}
-            className={`h-8 w-8 ${showInfo ? "bg-accent text-accent-foreground" : ""}`}
+            className={`h-8 w-8 text-white hover:bg-white/10 hover:text-white ${showInfo ? "bg-white/15" : ""}`}
           >
             <Info className="h-4 w-4" />
           </Button>
         </div>
       </div>
 
-      {/* Messages */}
-      <ScrollArea className="flex-1 bg-[hsl(var(--muted)/0.3)]">
+      {/* Messages - WhatsApp wallpaper */}
+      <ScrollArea
+        className="flex-1 bg-[#e5ddd5] dark:bg-[#0b141a]"
+        style={{
+          backgroundImage:
+            "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='100' height='100' viewBox='0 0 100 100'%3E%3Cg fill='%23000000' fill-opacity='0.045'%3E%3Cpath d='M20 10c3 4 3 8 0 12-3-4-3-8 0-12zm40 5c2 3 2 6 0 9-2-3-2-6 0-9zM10 45c3 3 3 7 0 10-3-3-3-7 0-10zm60-5c3 4 3 8 0 12-3-4-3-8 0-12zM35 60c2 3 2 6 0 9-2-3-2-6 0-9zm45 15c3 3 3 7 0 10-3-3-3-7 0-10zM15 80c2 3 2 6 0 9-2-3-2-6 0-9zm70-55c2 3 2 6 0 9-2-3-2-6 0-9z'/%3E%3C/g%3E%3C/svg%3E\")",
+        }}
+      >
         <div className="p-3 sm:p-4 space-y-1 max-w-3xl mx-auto">
           {groupedMessages.map((group) => (
             <div key={group.date}>
               <div className="flex justify-center my-3">
-                <span className="text-[10px] font-medium text-muted-foreground bg-card border rounded-full px-3 py-1 shadow-sm">
-                  {format(new Date(group.date), "dd 'de' MMMM", { locale: undefined })}
+                <span className="text-[11px] font-medium text-[#54656f] dark:text-[#8696a0] bg-white dark:bg-[#182229] rounded-lg px-3 py-1 shadow-sm">
+                  {format(new Date(group.date + "T00:00:00"), "dd 'de' MMMM", { locale: ptBR })}
                 </span>
               </div>
               <div className="space-y-1.5">
@@ -330,12 +469,12 @@ export function ChatArea({ conversation, onToggleInfo, showInfo, onBack }: ChatA
                     const isResolved = msg.content?.includes("resolvida");
                     return (
                       <div key={msg.id} className="flex justify-center my-2">
-                        <div className={`flex items-center gap-1.5 rounded-full px-3 py-1.5 text-xs max-w-[90%] shadow-sm ${
+                        <div className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs max-w-[90%] shadow-sm ${
                           isEscalation
                             ? "bg-amber-50 text-amber-700 border border-amber-200 dark:bg-amber-950/30 dark:text-amber-400 dark:border-amber-800"
                             : isResolved
                             ? "bg-emerald-50 text-emerald-700 border border-emerald-200 dark:bg-emerald-950/30 dark:text-emerald-400 dark:border-emerald-800"
-                            : "bg-card text-muted-foreground border"
+                            : "bg-white dark:bg-[#182229] text-[#54656f] dark:text-[#8696a0]"
                         }`}>
                           {isEscalation ? <AlertTriangle className="h-3 w-3 shrink-0" /> : isResolved ? <CheckCircle2 className="h-3 w-3 shrink-0" /> : <Info className="h-3 w-3 shrink-0" />}
                           <span className="truncate">{msg.content}</span>
@@ -346,21 +485,30 @@ export function ChatArea({ conversation, onToggleInfo, showInfo, onBack }: ChatA
 
                   const isOutbound = msg.direction === "outbound";
                   const isAI = msg.sender_type === "ai";
+                  const isPhone = msg.sender_type === "phone";
 
                   return (
                     <div key={msg.id} className={`flex ${isOutbound ? "justify-end" : "justify-start"}`}>
-                      <div className={`max-w-[85%] sm:max-w-[75%] rounded-2xl px-3.5 py-2.5 shadow-sm ${
-                        isOutbound
-                          ? isAI
-                            ? "bg-gradient-to-br from-primary/90 to-primary/80 text-primary-foreground rounded-br-sm"
-                            : "bg-primary text-primary-foreground rounded-br-sm"
-                          : "bg-card rounded-bl-sm border"
-                      }`}>
+                      <div
+                        className={`relative max-w-[85%] sm:max-w-[65%] rounded-lg px-2.5 pt-1.5 pb-1.5 shadow-sm ${
+                          isOutbound
+                            ? "bg-[#d9fdd3] dark:bg-[#005c4b] rounded-tr-none"
+                            : "bg-white dark:bg-[#202c33] rounded-tl-none"
+                        }`}
+                      >
+                        {/* Bubble tail */}
+                        <span
+                          className={`absolute top-0 w-0 h-0 border-[8px] border-transparent ${
+                            isOutbound
+                              ? "right-[-7px] border-l-[#d9fdd3] dark:border-l-[#005c4b] border-t-[#d9fdd3] dark:border-t-[#005c4b]"
+                              : "left-[-7px] border-r-white dark:border-r-[#202c33] border-t-white dark:border-t-[#202c33]"
+                          }`}
+                        />
                         {isOutbound && msg.sender_type !== "user" && (
-                          <div className={`flex items-center gap-1 mb-1 ${isAI ? "text-white/70" : "text-white/70"}`}>
-                            {isAI ? <Sparkles className="h-3 w-3" /> : <UserRound className="h-3 w-3" />}
+                          <div className="flex items-center gap-1 mb-1 text-[#008069] dark:text-[#00a884]">
+                            {isAI ? <Sparkles className="h-3 w-3" /> : isPhone ? <Smartphone className="h-3 w-3" /> : <UserRound className="h-3 w-3" />}
                             <span className="text-[10px] font-semibold tracking-wide">
-                              {isAI ? "ASSISTENTE IA" : "TÉCNICO"}
+                              {isAI ? "ASSISTENTE IA" : isPhone ? "VIA CELULAR" : "TÉCNICO"}
                             </span>
                           </div>
                         )}
@@ -370,7 +518,7 @@ export function ChatArea({ conversation, onToggleInfo, showInfo, onBack }: ChatA
                             <img
                               src={msg.media_url}
                               alt="Imagem"
-                              className="rounded-lg max-w-full max-h-64 object-cover cursor-pointer hover:opacity-90 transition-opacity"
+                              className="rounded-md max-w-full max-h-64 object-cover cursor-pointer hover:opacity-90 transition-opacity"
                               onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
                             />
                           </a>
@@ -379,7 +527,7 @@ export function ChatArea({ conversation, onToggleInfo, showInfo, onBack }: ChatA
                           <video
                             src={msg.media_url}
                             controls
-                            className="rounded-lg max-w-full max-h-64 mb-1.5"
+                            className="rounded-md max-w-full max-h-64 mb-1.5"
                           />
                         )}
                         {msg.media_url && msg.message_type === "audio" && (
@@ -390,22 +538,21 @@ export function ChatArea({ conversation, onToggleInfo, showInfo, onBack }: ChatA
                             href={msg.media_url}
                             target="_blank"
                             rel="noopener noreferrer"
-                            className={`flex items-center gap-2 mb-1.5 px-3 py-2 rounded-lg text-xs font-medium ${
-                              isOutbound ? "bg-white/10 text-white hover:bg-white/20" : "bg-muted hover:bg-muted/80"
-                            } transition-colors`}
+                            className="flex items-center gap-2 mb-1.5 px-3 py-2 rounded-md text-xs font-medium bg-black/5 hover:bg-black/10 dark:bg-white/10 dark:hover:bg-white/20 text-[#111b21] dark:text-white transition-colors"
                           >
                             📎 Documento anexo
                           </a>
                         )}
                         {msg.content && msg.content !== "[Mensagem sem texto]" && (
-                          <p className="text-sm whitespace-pre-wrap break-words leading-relaxed">{msg.content}</p>
+                          <p className="text-sm whitespace-pre-wrap break-words leading-relaxed text-[#111b21] dark:text-[#e9edef] pr-10">{msg.content}</p>
                         )}
-                        <div className={`flex items-center gap-1 mt-1 ${isOutbound ? "justify-end" : "justify-start"}`}>
-                          <span className={`text-[10px] ${isOutbound ? "text-white/50" : "text-muted-foreground"}`}>
+                        <div className="flex items-center gap-1 mt-0.5 justify-end float-right ml-2 -mb-1">
+                          <span className="text-[10px] text-[#667781] dark:text-[#8696a0]">
                             {format(new Date(msg.created_at), "HH:mm")}
                           </span>
                           {isOutbound && getStatusIcon(msg.status)}
                         </div>
+                        <div className="clear-both" />
                       </div>
                     </div>
                   );
@@ -417,17 +564,17 @@ export function ChatArea({ conversation, onToggleInfo, showInfo, onBack }: ChatA
         </div>
       </ScrollArea>
 
-      {/* Input - Professional bottom bar */}
-      <div className="border-t bg-card shrink-0 pb-[env(safe-area-inset-bottom,4px)]">
+      {/* Input - WhatsApp style bottom bar */}
+      <div className="bg-[#f0f2f5] dark:bg-[#202c33] shrink-0 pb-[env(safe-area-inset-bottom,4px)]">
         {conversation.ai_enabled && (
-          <div className="flex items-center gap-2 px-4 py-1.5 bg-primary/5 border-b border-primary/10">
-            <Sparkles className="h-3.5 w-3.5 text-primary shrink-0" />
-            <span className="text-[11px] text-primary font-medium truncate">
+          <div className="flex items-center gap-2 px-4 py-1.5 bg-[#d9fdd3]/60 dark:bg-[#005c4b]/30 border-b border-[#008069]/10">
+            <Sparkles className="h-3.5 w-3.5 text-[#008069] dark:text-[#00a884] shrink-0" />
+            <span className="text-[11px] text-[#008069] dark:text-[#00a884] font-medium truncate">
               IA respondendo automaticamente • Envie uma mensagem para intervir
             </span>
           </div>
         )}
-        <div className="flex gap-2 p-3 max-w-3xl mx-auto">
+        <div className="flex items-end gap-2 p-2 sm:p-3 max-w-3xl mx-auto">
           <input
             ref={fileInputRef}
             type="file"
@@ -435,33 +582,79 @@ export function ChatArea({ conversation, onToggleInfo, showInfo, onBack }: ChatA
             onChange={handleFileSelect}
             accept="image/*,video/*,audio/*,application/pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.zip,.rar"
           />
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon"
-            className="h-10 w-10 shrink-0 rounded-lg"
-            onClick={() => fileInputRef.current?.click()}
-            disabled={sending || uploading}
-            title="Anexar arquivo"
-          >
-            {uploading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Paperclip className="h-4 w-4" />}
-          </Button>
-          <Input
-            placeholder={conversation.ai_enabled ? "Intervir manualmente..." : "Digite uma mensagem ou legenda..."}
-            value={newMessage}
-            onChange={(e) => setNewMessage(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && !e.shiftKey && handleSend()}
-            disabled={sending || uploading}
-            className="flex-1 h-10 bg-muted/50 border-0 focus-visible:ring-1"
-          />
-          <Button
-            onClick={handleSend}
-            disabled={!newMessage.trim() || sending || uploading}
-            size="icon"
-            className="h-10 w-10 shrink-0 rounded-lg"
-          >
-            <Send className="h-4 w-4" />
-          </Button>
+          {isRecording ? (
+            <>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                className="h-10 w-10 shrink-0 rounded-full text-red-500 hover:bg-red-500/10"
+                onClick={() => stopRecording(true)}
+                title="Cancelar gravação"
+              >
+                <Trash2 className="h-4 w-4" />
+              </Button>
+              <div className="flex-1 h-10 flex items-center gap-2 bg-white dark:bg-[#2a3942] rounded-full px-4 shadow-sm">
+                <span className="h-2.5 w-2.5 rounded-full bg-red-500 animate-pulse shrink-0" />
+                <span className="text-sm font-medium text-[#111b21] dark:text-[#e9edef] tabular-nums shrink-0">
+                  {formatRecordingTime(recordingSeconds)}
+                </span>
+                <span className="text-xs text-muted-foreground truncate">Gravando áudio...</span>
+              </div>
+              <Button
+                onClick={() => stopRecording(false)}
+                disabled={sending}
+                size="icon"
+                className="h-10 w-10 shrink-0 rounded-full bg-[#008069] hover:bg-[#008069]/90 dark:bg-[#00a884] dark:hover:bg-[#00a884]/90 text-white"
+                title="Enviar áudio"
+              >
+                {sending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
+              </Button>
+            </>
+          ) : (
+            <>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                className="h-10 w-10 shrink-0 rounded-full text-[#54656f] dark:text-[#aebac1] hover:bg-black/5 dark:hover:bg-white/10"
+                onClick={() => fileInputRef.current?.click()}
+                disabled={sending || uploading}
+                title="Anexar arquivo"
+              >
+                {uploading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Paperclip className="h-4 w-4" />}
+              </Button>
+              <Input
+                placeholder={conversation.ai_enabled ? "Intervir manualmente..." : "Digite uma mensagem"}
+                value={newMessage}
+                onChange={(e) => setNewMessage(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && !e.shiftKey && handleSend()}
+                disabled={sending || uploading}
+                className="flex-1 h-10 bg-white dark:bg-[#2a3942] border-0 rounded-full focus-visible:ring-0 focus-visible:ring-offset-0 shadow-sm"
+              />
+              {newMessage.trim() ? (
+                <Button
+                  onClick={handleSend}
+                  disabled={sending || uploading}
+                  size="icon"
+                  className="h-10 w-10 shrink-0 rounded-full bg-[#008069] hover:bg-[#008069]/90 dark:bg-[#00a884] dark:hover:bg-[#00a884]/90 text-white"
+                >
+                  <Send className="h-4 w-4" />
+                </Button>
+              ) : (
+                <Button
+                  type="button"
+                  onClick={startRecording}
+                  disabled={sending || uploading}
+                  size="icon"
+                  className="h-10 w-10 shrink-0 rounded-full bg-[#008069] hover:bg-[#008069]/90 dark:bg-[#00a884] dark:hover:bg-[#00a884]/90 text-white"
+                  title="Gravar áudio"
+                >
+                  <Mic className="h-4 w-4" />
+                </Button>
+              )}
+            </>
+          )}
         </div>
       </div>
     </div>

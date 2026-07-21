@@ -1,5 +1,6 @@
 import { serve } from "https://deno.land/std@0.190.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { sendWabaText } from "../_shared/waba-provider.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -19,6 +20,27 @@ function formatPhone(contato: string): string | null {
   if (digits.length < 10) return null;
   if (digits.startsWith("55") && digits.length >= 12) return digits;
   return `55${digits}`;
+}
+
+// Deduplicação: evita reenviar a mesma transição de status para o mesmo atendimento.
+async function alreadyNotified(supabase: any, entityId: string, status: string): Promise<boolean> {
+  const { data } = await supabase
+    .from("whatsapp_notification_log")
+    .select("status")
+    .eq("entity_type", "daily_record")
+    .eq("entity_id", entityId)
+    .order("sent_at", { ascending: false })
+    .limit(1);
+  return !!(data && data.length && data[0].status === status);
+}
+
+async function logNotification(supabase: any, entityId: string, status: string, phone: string | null): Promise<void> {
+  await supabase.from("whatsapp_notification_log").insert({
+    entity_type: "daily_record",
+    entity_id: entityId,
+    status,
+    phone,
+  });
 }
 
 serve(async (req: Request) => {
@@ -44,25 +66,23 @@ serve(async (req: Request) => {
       );
     }
 
-    const MABBIX_BACKEND_URL = Deno.env.get("MABBIX_BACKEND_URL")?.replace("//chat.mabbix.com.br", "//apichat.mabbix.com.br");
-    const MABBIX_CONNECTION_TOKEN = Deno.env.get("MABBIX_CONNECTION_TOKEN");
-
-    if (!MABBIX_BACKEND_URL || !MABBIX_CONNECTION_TOKEN) {
-      return new Response(
-        JSON.stringify({ error: "Mabbix API not configured" }),
-        { status: 500, headers: { "Content-Type": "application/json", ...corsHeaders } }
-      );
-    }
-
     const supabase = createClient(
       Deno.env.get("SUPABASE_URL")!,
       Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
     );
 
-    // Get the daily record with ticket info
+    // DEDUP: se a última notificação desse atendimento já foi esse mesmo status, não reenvia.
+    if (await alreadyNotified(supabase, daily_record_id, new_status)) {
+      console.log(`Skip duplicate daily record notification (status: ${new_status})`);
+      return new Response(
+        JSON.stringify({ skipped: true, reason: "duplicate status" }),
+        { headers: { "Content-Type": "application/json", ...corsHeaders } }
+      );
+    }
+
     const { data: record, error: recordError } = await supabase
       .from("daily_service_records")
-      .select("ticket_id, company_id, titulo, descricao, solucao")
+      .select("ticket_id, company_id, titulo, descricao, solucao, asset_id, tecnico_id")
       .eq("id", daily_record_id)
       .single();
 
@@ -74,7 +94,6 @@ serve(async (req: Request) => {
       );
     }
 
-    // Try to get contact from the linked ticket
     let phone: string | null = null;
     let contactName: string | null = null;
 
@@ -91,7 +110,6 @@ serve(async (req: Request) => {
       }
     }
 
-    // Fallback 1: try company WhatsApp field
     if (!phone && record.company_id) {
       const { data: company } = await supabase
         .from("companies")
@@ -104,14 +122,12 @@ serve(async (req: Request) => {
         if (company.whatsapp) {
           phone = formatPhone(company.whatsapp);
         }
-        // Fallback 2: try company telefone
         if (!phone && company.telefone) {
           phone = formatPhone(company.telefone);
         }
       }
     }
 
-    // Fallback 3: try whatsapp_contacts table
     if (!phone && record.company_id) {
       const { data: contacts } = await supabase
         .from("whatsapp_contacts")
@@ -134,7 +150,6 @@ serve(async (req: Request) => {
       );
     }
 
-    // Busca dados do técnico
     let tecnico: { nome: string } | null = null;
     if (record.tecnico_id) {
       const { data } = await supabase
@@ -145,7 +160,20 @@ serve(async (req: Request) => {
       tecnico = data;
     }
 
-    // Build message comprovante completo
+    let equipamentoLabel: string | null = null;
+    if (record.asset_id) {
+      const { data: asset } = await supabase
+        .from("assets")
+        .select("nome, modelo, tag_patrimonial")
+        .eq("id", record.asset_id)
+        .single();
+      if (asset) {
+        equipamentoLabel = asset.nome;
+        if (asset.modelo) equipamentoLabel += ` (${asset.modelo})`;
+        if (asset.tag_patrimonial) equipamentoLabel += ` - Patrimônio: ${asset.tag_patrimonial}`;
+      }
+    }
+
     const now = new Date();
     const dataHora = now.toLocaleString("pt-BR", {
       timeZone: "America/Sao_Paulo",
@@ -159,6 +187,10 @@ serve(async (req: Request) => {
 
     if (contactName) {
       message += `\n🏢 *Empresa:* ${contactName}`;
+    }
+
+    if (equipamentoLabel) {
+      message += `\n🖥️ *Equipamento:* ${equipamentoLabel}`;
     }
 
     if (tecnico?.nome) {
@@ -181,22 +213,11 @@ serve(async (req: Request) => {
 
     console.log(`Sending daily record notification to ${phone} (status: ${new_status})`);
 
-    const response = await fetch(`${MABBIX_BACKEND_URL}/api/messages/send`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${MABBIX_CONNECTION_TOKEN}`,
-      },
-      body: JSON.stringify({
-        number: phone,
-        openTicket: "0",
-        queueId: "0",
-        body: message,
-      }),
-    });
+    const result = await sendWabaText(phone, message, { openTicket: false });
+    console.log("WABA notification response:", JSON.stringify(result.raw).substring(0, 300));
 
-    const result = await response.json();
-    console.log("Mabbix notification response:", JSON.stringify(result).substring(0, 300));
+    // Registra no log para deduplicação das próximas chamadas.
+    await logNotification(supabase, daily_record_id, new_status, phone);
 
     return new Response(
       JSON.stringify({ success: true, phone, status: new_status }),

@@ -6,7 +6,6 @@ import { useDashboardData } from "@/hooks/useDashboardData";
 import { supabase } from "@/integrations/supabase/client";
 import { QuickFieldDialog } from "@/components/daily-records/QuickFieldDialog";
 import { NewTicketsPanel } from "@/components/dashboard/NewTicketsPanel";
-import { useDattoRealtime } from "@/hooks/useDattoRealtime";
 import { useTicketAutomation } from "@/hooks/useTicketAutomation";
 
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -20,7 +19,6 @@ import { NotificationPermissionPrompt } from "@/components/notifications/Notific
 import { QuickRemoteServiceCard } from "@/components/dashboard/QuickRemoteServiceCard";
 import { RemoteServiceQuickDialog } from "@/components/dashboard/RemoteServiceQuickDialog";
 import { SmartAlertsPanel } from "@/components/ai/SmartAlertsPanel";
-import { DattoMonitoringPanel } from "@/components/dashboard/DattoMonitoringPanel";
 import { formatDateBR } from "@/lib/formatters";
 import {
   Clock,
@@ -92,7 +90,6 @@ export default function Dashboard() {
   };
 
   // Hooks de automação e tempo real
-  useDattoRealtime();
   useTicketAutomation();
 
   const {
@@ -367,7 +364,6 @@ export default function Dashboard() {
 
             {/* ── ALERTAS IA ── */}
             {isAdmin && <SmartAlertsPanel />}
-            {isAdminOrTech && <DattoMonitoringPanel />}
 
             {/* ── NOVOS CHAMADOS COM TRIAGEM IA ── */}
             {isAdminOrTech && <NewTicketsPanel />}

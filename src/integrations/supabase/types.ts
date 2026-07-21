@@ -181,6 +181,122 @@ export type Database = {
         }
         Relationships: []
       }
+      appointment_notification_log: {
+        Row: {
+          appointment_id: string
+          channel: string
+          id: string
+          sent_at: string
+          user_id: string
+        }
+        Insert: {
+          appointment_id: string
+          channel?: string
+          id?: string
+          sent_at?: string
+          user_id: string
+        }
+        Update: {
+          appointment_id?: string
+          channel?: string
+          id?: string
+          sent_at?: string
+          user_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "appointment_notification_log_appointment_id_fkey"
+            columns: ["appointment_id"]
+            isOneToOne: false
+            referencedRelation: "appointments"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      appointments: {
+        Row: {
+          appointment_date: string
+          appointment_time: string | null
+          company_id: string | null
+          created_at: string
+          description: string | null
+          end_time: string | null
+          id: string
+          notify_minutes: number | null
+          status: string
+          title: string
+          type: string
+          updated_at: string
+          user_id: string
+        }
+        Insert: {
+          appointment_date: string
+          appointment_time?: string | null
+          company_id?: string | null
+          created_at?: string
+          description?: string | null
+          end_time?: string | null
+          id?: string
+          notify_minutes?: number | null
+          status?: string
+          title: string
+          type?: string
+          updated_at?: string
+          user_id: string
+        }
+        Update: {
+          appointment_date?: string
+          appointment_time?: string | null
+          company_id?: string | null
+          created_at?: string
+          description?: string | null
+          end_time?: string | null
+          id?: string
+          notify_minutes?: number | null
+          status?: string
+          title?: string
+          type?: string
+          updated_at?: string
+          user_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "appointments_company_id_fkey"
+            columns: ["company_id"]
+            isOneToOne: false
+            referencedRelation: "asset_inventory_by_company"
+            referencedColumns: ["company_id"]
+          },
+          {
+            foreignKeyName: "appointments_company_id_fkey"
+            columns: ["company_id"]
+            isOneToOne: false
+            referencedRelation: "companies"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "appointments_company_id_fkey"
+            columns: ["company_id"]
+            isOneToOne: false
+            referencedRelation: "companies_basic"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "appointments_company_id_fkey"
+            columns: ["company_id"]
+            isOneToOne: false
+            referencedRelation: "companies_safe"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "appointments_company_id_fkey"
+            columns: ["company_id"]
+            isOneToOne: false
+            referencedRelation: "company_statistics"
+            referencedColumns: ["company_id"]
+          },
+        ]
+      }
       asset_categories: {
         Row: {
           cor: string | null
@@ -585,6 +701,8 @@ export type Database = {
           longitude: number | null
           nome_fantasia: string
           razao_social: string | null
+          representante_cpf: string | null
+          representante_legal: string | null
           sla_primeiro_atendimento_horas: number | null
           sla_solucao_horas: number | null
           status: boolean | null
@@ -605,6 +723,8 @@ export type Database = {
           longitude?: number | null
           nome_fantasia: string
           razao_social?: string | null
+          representante_cpf?: string | null
+          representante_legal?: string | null
           sla_primeiro_atendimento_horas?: number | null
           sla_solucao_horas?: number | null
           status?: boolean | null
@@ -625,6 +745,8 @@ export type Database = {
           longitude?: number | null
           nome_fantasia?: string
           razao_social?: string | null
+          representante_cpf?: string | null
+          representante_legal?: string | null
           sla_primeiro_atendimento_horas?: number | null
           sla_solucao_horas?: number | null
           status?: boolean | null
@@ -712,6 +834,7 @@ export type Database = {
           company_id: string
           created_at: string | null
           descricao: string | null
+          dia_vencimento: number | null
           horas_consumidas: number | null
           horas_contratadas: number | null
           id: string
@@ -720,6 +843,7 @@ export type Database = {
           status: Database["public"]["Enums"]["contract_status"]
           tipo: Database["public"]["Enums"]["contract_type"]
           updated_at: string | null
+          valor_implantacao: number | null
           valor_mensal: number | null
           vigencia_fim: string | null
           vigencia_inicio: string
@@ -728,6 +852,7 @@ export type Database = {
           company_id: string
           created_at?: string | null
           descricao?: string | null
+          dia_vencimento?: number | null
           horas_consumidas?: number | null
           horas_contratadas?: number | null
           id?: string
@@ -736,6 +861,7 @@ export type Database = {
           status?: Database["public"]["Enums"]["contract_status"]
           tipo?: Database["public"]["Enums"]["contract_type"]
           updated_at?: string | null
+          valor_implantacao?: number | null
           valor_mensal?: number | null
           vigencia_fim?: string | null
           vigencia_inicio: string
@@ -744,6 +870,7 @@ export type Database = {
           company_id?: string
           created_at?: string | null
           descricao?: string | null
+          dia_vencimento?: number | null
           horas_consumidas?: number | null
           horas_contratadas?: number | null
           id?: string
@@ -752,6 +879,7 @@ export type Database = {
           status?: Database["public"]["Enums"]["contract_status"]
           tipo?: Database["public"]["Enums"]["contract_type"]
           updated_at?: string | null
+          valor_implantacao?: number | null
           valor_mensal?: number | null
           vigencia_fim?: string | null
           vigencia_inicio?: string
@@ -1633,13 +1761,6 @@ export type Database = {
         }
         Relationships: [
           {
-            foreignKeyName: "service_orders_asset_id_fkey"
-            columns: ["asset_id"]
-            isOneToOne: false
-            referencedRelation: "assets"
-            referencedColumns: ["id"]
-          },
-          {
             foreignKeyName: "service_orders_company_id_fkey"
             columns: ["company_id"]
             isOneToOne: false
@@ -1847,6 +1968,7 @@ export type Database = {
           prioridade: Database["public"]["Enums"]["priority_level"] | null
           public_request: boolean | null
           sla_atendimento_limite: string | null
+          sla_escalado: string | null
           sla_solucao_limite: string | null
           solicitante_contato: string | null
           solicitante_id: string | null
@@ -1879,6 +2001,7 @@ export type Database = {
           prioridade?: Database["public"]["Enums"]["priority_level"] | null
           public_request?: boolean | null
           sla_atendimento_limite?: string | null
+          sla_escalado?: string | null
           sla_solucao_limite?: string | null
           solicitante_contato?: string | null
           solicitante_id?: string | null
@@ -1911,6 +2034,7 @@ export type Database = {
           prioridade?: Database["public"]["Enums"]["priority_level"] | null
           public_request?: boolean | null
           sla_atendimento_limite?: string | null
+          sla_escalado?: string | null
           sla_solucao_limite?: string | null
           solicitante_contato?: string | null
           solicitante_id?: string | null
@@ -1925,20 +2049,6 @@ export type Database = {
           urgencia?: Database["public"]["Enums"]["urgency_level"] | null
         }
         Relationships: [
-          {
-            foreignKeyName: "tickets_asset_id_fkey"
-            columns: ["asset_id"]
-            isOneToOne: false
-            referencedRelation: "assets"
-            referencedColumns: ["id"]
-          },
-          {
-            foreignKeyName: "tickets_category_id_fkey"
-            columns: ["category_id"]
-            isOneToOne: false
-            referencedRelation: "categories"
-            referencedColumns: ["id"]
-          },
           {
             foreignKeyName: "tickets_company_id_fkey"
             columns: ["company_id"]
@@ -1986,13 +2096,6 @@ export type Database = {
             columns: ["solicitante_id"]
             isOneToOne: false
             referencedRelation: "profiles_safe"
-            referencedColumns: ["id"]
-          },
-          {
-            foreignKeyName: "tickets_subcategory_id_fkey"
-            columns: ["subcategory_id"]
-            isOneToOne: false
-            referencedRelation: "subcategories"
             referencedColumns: ["id"]
           },
           {
@@ -2394,6 +2497,8 @@ export type Database = {
           id?: string | null
           nome_fantasia?: string | null
           razao_social?: string | null
+          representante_cpf?: string | null
+          representante_legal?: string | null
           sla_primeiro_atendimento_horas?: number | null
           sla_solucao_horas?: number | null
           status?: boolean | null
@@ -2408,6 +2513,8 @@ export type Database = {
           id?: string | null
           nome_fantasia?: string | null
           razao_social?: string | null
+          representante_cpf?: string | null
+          representante_legal?: string | null
           sla_primeiro_atendimento_horas?: number | null
           sla_solucao_horas?: number | null
           status?: boolean | null
@@ -2561,10 +2668,7 @@ export type Database = {
         Returns: boolean
       }
       get_user_company_id: { Args: { _user_id: string }; Returns: string }
-      get_user_role: {
-        Args: { _user_id: string }
-        Returns: Database["public"]["Enums"]["user_role"]
-      }
+      get_user_role: { Args: { user_id: string }; Returns: string }
       get_user_roles: {
         Args: { _user_id: string }
         Returns: Database["public"]["Enums"]["user_role"][]
@@ -2603,6 +2707,7 @@ export type Database = {
           migrated_count: number
         }[]
       }
+      uuid_generate_v4: { Args: never; Returns: string }
     }
     Enums: {
       asset_relationship_type:

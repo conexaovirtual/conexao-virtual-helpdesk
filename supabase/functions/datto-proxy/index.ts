@@ -29,7 +29,7 @@ serve(async (req) => {
 
     // Repassa para o projeto principal
     const targetUrl = "https://ispqekzrrufhzdqhjnck.supabase.co/functions/v1/datto-rmm-webhook";
-    const anonKey = Deno.env.get("LOVABLE_ANON_KEY")!;
+    const anonKey = Deno.env.get("MAIN_ANON_KEY")!;
 
     const response = await fetch(targetUrl, {
       method: "POST",

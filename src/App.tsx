@@ -10,6 +10,7 @@ import { lazyWithRetry } from "@/lib/lazyWithRetry";
 import Index from "./pages/Index";
 import Auth from "./pages/Auth";
 import { AppLayout } from "./components/layout/AppLayout";
+import { StandaloneWhatsApp } from "./components/layout/StandaloneWhatsApp";
 
 // Lazy load páginas pesadas (com retry automático em caso de falha de chunk após deploy)
 const Dashboard = lazyWithRetry(() => import("./pages/Dashboard"));
@@ -38,10 +39,16 @@ const CostCenter = lazyWithRetry(() => import("./pages/CostCenter"));
 const Contracts = lazyWithRetry(() => import("./pages/Contracts"));
 const CMDB = lazyWithRetry(() => import("./pages/CMDB"));
 const NetworkMonitor = lazyWithRetry(() => import("./pages/NetworkMonitor"));
-const DattoCallback = lazyWithRetry(() => import("./pages/DattoCallback"));
 const OperationalDashboard = lazyWithRetry(() => import("./pages/OperationalDashboard"));
 const RoutePlanner = lazyWithRetry(() => import("./pages/RoutePlanner"));
+const Deslocamento = lazyWithRetry(() => import("./pages/Deslocamento"));
+const MeuDia = lazyWithRetry(() => import("./pages/MeuDia"));
 const CompanyMap = lazyWithRetry(() => import("./pages/CompanyMap"));
+const OrcamentoPrint = lazyWithRetry(() => import("./pages/OrcamentoPrint"));
+const CsatDashboard = lazyWithRetry(() => import("./pages/CsatDashboard"));
+const Produtos = lazyWithRetry(() => import("./pages/Produtos"));
+const Servicos = lazyWithRetry(() => import("./pages/Servicos"));
+const Propostas = lazyWithRetry(() => import("./pages/Propostas"));
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -82,7 +89,10 @@ const App = () => (
             <Route path="/" element={<Index />} />
             <Route path="/auth" element={<Auth />} />
             <Route path="/public/ticket" element={<PublicTicket />} />
-            <Route path="/datto-callback" element={<DattoCallback />} />
+            <Route path="/orcamento/:id/print" element={<OrcamentoPrint />} />
+
+            {/* Standalone WhatsApp app window (no sidebar/header chrome) — for PWA/Dock install */}
+            <Route path="/app-whatsapp" element={<StandaloneWhatsApp />} />
 
             {/* Authenticated routes with sidebar */}
             <Route element={<AppLayout />}>
@@ -99,6 +109,10 @@ const App = () => (
               <Route path="/service-orders/new" element={<ServiceOrderPage />} />
               <Route path="/profile/settings" element={<ProfileSettings />} />
               <Route path="/analytics" element={<Analytics />} />
+              <Route path="/csat" element={<CsatDashboard />} />
+              <Route path="/produtos" element={<Produtos />} />
+              <Route path="/servicos" element={<Servicos />} />
+              <Route path="/propostas" element={<Propostas />} />
               <Route path="/knowledge-base" element={<KnowledgeBase />} />
               <Route path="/waba-chat" element={<WABAChat />} />
               <Route path="/ai-support" element={<AISupportChat />} />
@@ -112,6 +126,8 @@ const App = () => (
               <Route path="/network-monitor" element={<NetworkMonitor />} />
               <Route path="/operational" element={<OperationalDashboard />} />
               <Route path="/route-planner" element={<RoutePlanner />} />
+              <Route path="/deslocamento" element={<Deslocamento />} />
+              <Route path="/meu-dia" element={<MeuDia />} />
               <Route path="/company-map" element={<CompanyMap />} />
             </Route>
 

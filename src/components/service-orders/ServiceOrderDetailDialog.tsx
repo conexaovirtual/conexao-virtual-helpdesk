@@ -13,10 +13,11 @@ const safeFormat = (dateStr: string | null | undefined, fmt: string) => {
   const d = new Date(dateStr);
   return isValid(d) ? format(d, fmt, { locale: ptBR }) : "N/A";
 };
-import { CheckCircle, XCircle, PlayCircle, FileText, Clock, Calendar, Edit, Loader2 } from "lucide-react";
+import { CheckCircle, XCircle, PlayCircle, FileText, Clock, Calendar, Edit, Loader2, Receipt } from "lucide-react";
 import { generateServiceOrderPDF } from "./ServiceOrderPDF";
 import { ServiceOrderEditDialog } from "./ServiceOrderEditDialog";
 import { ServiceOrderExecutionDialog } from "./ServiceOrderExecutionDialog";
+import { OrcamentoDialog } from "@/components/orcamentos/OrcamentoDialog";
 
 interface ServiceOrderDetailDialogProps {
   open: boolean;
@@ -54,6 +55,7 @@ export function ServiceOrderDetailDialog({
   const [history, setHistory] = useState<any[]>([]);
   const [isEditDialogOpen, setIsEditDialogOpen] = useState(false);
   const [isExecutionDialogOpen, setIsExecutionDialogOpen] = useState(false);
+  const [isOrcamentoOpen, setIsOrcamentoOpen] = useState(false);
   const { toast } = useToast();
 
   useEffect(() => {
@@ -99,17 +101,19 @@ export function ServiceOrderDetailDialog({
         observacao,
       });
 
-      // Notificar cliente via WhatsApp (fire and forget)
-      supabase.functions.invoke("notify-os-status", {
-        body: {
-          service_order_id: serviceOrder.id,
-          new_status: newStatus,
-          observacao,
-        },
-      }).then(res => {
-        if (res.error) console.error("Erro ao notificar cliente:", res.error);
-        else console.log("Notificação WhatsApp enviada:", res.data);
-      }).catch(err => console.error("Erro ao chamar notify-os-status:", err));
+      // Notificar cliente via WhatsApp APENAS quando o status mudou de fato.
+      if (newStatus !== serviceOrder.status) {
+        supabase.functions.invoke("notify-os-status", {
+          body: {
+            service_order_id: serviceOrder.id,
+            new_status: newStatus,
+            observacao,
+          },
+        }).then(res => {
+          if (res.error) console.error("Erro ao notificar cliente:", res.error);
+          else console.log("Notificação WhatsApp enviada:", res.data);
+        }).catch(err => console.error("Erro ao chamar notify-os-status:", err));
+      }
 
       toast({
         title: "Status atualizado!",
@@ -117,7 +121,6 @@ export function ServiceOrderDetailDialog({
       });
 
       onUpdate?.();
-      onOpenChange(false);
     } catch (error: any) {
       console.error("Erro ao atualizar status:", error);
       toast({
@@ -378,6 +381,19 @@ export function ServiceOrderDetailDialog({
               Editar OS
             </Button>
 
+            {/* Orçamento */}
+            {serviceOrder.status !== "cancelada" && (
+              <Button
+                onClick={() => setIsOrcamentoOpen(true)}
+                variant="outline"
+                size="sm"
+                className="border-orange-400 text-orange-700 hover:bg-orange-50"
+              >
+                <Receipt className="h-4 w-4 mr-2" />
+                Orçamento
+              </Button>
+            )}
+
             {/* Botão Registrar Execução - disponível apenas quando em_execucao */}
             {serviceOrder.status === "em_execucao" && (
               <Button
@@ -475,6 +491,13 @@ export function ServiceOrderDetailDialog({
             onUpdate?.();
             setIsExecutionDialogOpen(false);
           }}
+        />
+
+        <OrcamentoDialog
+          open={isOrcamentoOpen}
+          onOpenChange={setIsOrcamentoOpen}
+          serviceOrder={serviceOrder}
+          onSuccess={onUpdate}
         />
       </DialogContent>
     </Dialog>

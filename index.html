@@ -2,11 +2,19 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <title>Conexão Virtual - Help Desk TI</title>
     <meta name="description" content="Sistema profissional de Help Desk com QR Code e gestão de ativos - Conexão Virtual Soluções Tecnológicas" />
     <meta name="author" content="Conexão Virtual" />
-    <link rel="icon" type="image/png" href="/logo-conexaovirtual.png" />
+    <link rel="icon" type="image/png" href="/icon-conexaovirtual-512.png" />
+
+    <!-- iOS / iPadOS: ícone na tela de início, modo standalone e cor da barra -->
+    <link rel="apple-touch-icon" href="/icon-conexaovirtual-512.png" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+    <meta name="apple-mobile-web-app-title" content="Help Desk" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="theme-color" content="#667eea" />
 
     <meta property="og:title" content="Conexão Virtual - Help Desk TI" />
     <meta property="og:description" content="Sistema profissional de Help Desk com QR Code e gestão de ativos" />
@@ -14,8 +22,7 @@
     <meta property="og:image" content="/logo-conexaovirtual.png" />
 
     <meta name="twitter:card" content="summary_large_image" />
-    <meta name="twitter:site" content="@lovable_dev" />
-    <meta name="twitter:image" content="https://lovable.dev/opengraph-image-p98pqg.png" />
+    <meta name="twitter:image" content="/logo-conexaovirtual.png" />
   </head>
 
   <body>
@@ -23,7 +30,7 @@
     <script>
       // Recover from stale chunk errors after a deploy by clearing SW + caches and reloading once.
       (function () {
-        var KEY = 'lovable:chunk-reloaded';
+        var KEY = 'cv:chunk-reloaded';
         function isChunkError(msg) {
           if (!msg) return false;
           msg = String(msg);

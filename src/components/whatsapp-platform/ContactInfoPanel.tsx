@@ -6,12 +6,13 @@ import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import {
-  Phone, Building2, Ticket, Calendar, Bot, UserRound, X, ExternalLink, UserCheck
+  Phone, Building2, Ticket, Calendar, Bot, UserRound, X, ExternalLink, UserCheck, Wrench, Loader2
 } from "lucide-react";
 import { AssignmentSelect } from "./AssignmentSelect";
 import { format } from "date-fns";
 import { ptBR } from "date-fns/locale";
 import { useNavigate } from "react-router-dom";
+import { toast } from "sonner";
 import type { Conversation } from "./ConversationList";
 
 interface ContactInfoPanelProps {
@@ -25,6 +26,46 @@ export function ContactInfoPanel({ conversation, onClose }: ContactInfoPanelProp
   const [company, setCompany] = useState<any>(null);
   const [tickets, setTickets] = useState<any[]>([]);
   const [msgStats, setMsgStats] = useState({ total: 0, ai: 0, agent: 0 });
+  const [creating, setCreating] = useState<null | "ticket" | "os">(null);
+
+  const abrirChamado = async () => {
+    if (!contact?.company_id) { toast.error("Vincule o contato a uma empresa primeiro."); return; }
+    setCreating("ticket");
+    try {
+      const { data, error } = await supabase.from("tickets").insert({
+        company_id: contact.company_id,
+        titulo: `WhatsApp — ${conversation.contact_name || conversation.phone_number}`,
+        descricao: `Chamado aberto a partir da conversa de WhatsApp (${conversation.phone_number}).`,
+        canal: "whatsapp",
+        status: "novo",
+      }).select("id, numero").single();
+      if (error) throw error;
+      toast.success(`Chamado #${data.numero} aberto!`);
+      navigate(`/tickets/${data.id}`);
+    } catch (e: any) {
+      toast.error("Erro ao abrir chamado: " + e.message);
+    } finally { setCreating(null); }
+  };
+
+  const gerarOS = async () => {
+    if (!contact?.company_id) { toast.error("Vincule o contato a uma empresa primeiro."); return; }
+    setCreating("os");
+    try {
+      const { data, error } = await supabase.from("service_orders").insert({
+        company_id: contact.company_id,
+        tipo_servico: "corretivo",
+        prioridade: "media",
+        status: "agendada",
+        descricao_servicos: `Atendimento solicitado via WhatsApp (${conversation.phone_number}).`,
+        data_emissao: new Date().toISOString(),
+      }).select("id, numero_os").single();
+      if (error) throw error;
+      toast.success(`OS #${data.numero_os} criada!`);
+      navigate("/reports?tab=service-orders");
+    } catch (e: any) {
+      toast.error("Erro ao gerar OS: " + e.message);
+    } finally { setCreating(null); }
+  };
 
   useEffect(() => {
     const load = async () => {
@@ -110,6 +151,33 @@ export function ContactInfoPanel({ conversation, onClose }: ContactInfoPanelProp
                 {conversation.status}
               </Badge>
             </div>
+          </div>
+
+          {/* Ações rápidas: abrir chamado / gerar OS a partir do chat */}
+          <div className="space-y-1.5">
+            <div className="grid grid-cols-2 gap-2">
+              <Button
+                size="sm" variant="outline" className="h-8 text-xs gap-1"
+                disabled={creating !== null || !contact?.company_id}
+                onClick={abrirChamado}
+              >
+                {creating === "ticket" ? <Loader2 className="h-3 w-3 animate-spin" /> : <Ticket className="h-3 w-3" />}
+                Abrir Chamado
+              </Button>
+              <Button
+                size="sm" variant="outline" className="h-8 text-xs gap-1"
+                disabled={creating !== null || !contact?.company_id}
+                onClick={gerarOS}
+              >
+                {creating === "os" ? <Loader2 className="h-3 w-3 animate-spin" /> : <Wrench className="h-3 w-3" />}
+                Gerar OS
+              </Button>
+            </div>
+            {!contact?.company_id && (
+              <p className="text-[10px] text-muted-foreground text-center">
+                Vincule o contato a uma empresa para abrir chamado/OS
+              </p>
+            )}
           </div>
 
           <Separator />

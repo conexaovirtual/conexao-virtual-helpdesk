@@ -1,4 +1,5 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { sendWabaText } from "../_shared/waba-provider.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -180,18 +181,90 @@ async function refreshAccessToken(
   return newAccessToken;
 }
 
+// Autentica via API Key + Secret do Datto (password grant) — não exige login manual
+// e pode ser renovado indefinidamente. Persiste o token gerado em datto_oauth_tokens.
+async function mintTokenWithApiKey(
+  supabase: any,
+  dattoApiUrl: string,
+  storedToken: StoredToken | null,
+): Promise<string> {
+  const apiKey = Deno.env.get("DATTO_API_KEY");
+  const apiSecret = Deno.env.get("DATTO_API_SECRET_KEY");
+  if (!apiKey || !apiSecret) {
+    throw new Error(
+      "Token Datto expirado e sem refresh_token. Configure DATTO_API_KEY/DATTO_API_SECRET_KEY ou reautorize o Datto.",
+    );
+  }
+
+  console.log("[Datto] Gerando token via API Key (password grant)...");
+  const tokenUrl = `${dattoApiUrl}/auth/oauth/token`;
+  const response = await fetch(tokenUrl, {
+    method: "POST",
+    headers: {
+      Authorization: `Basic ${btoa("public-client:public")}`,
+      "Content-Type": "application/x-www-form-urlencoded",
+      Accept: "application/json",
+    },
+    body: new URLSearchParams({
+      grant_type: "password",
+      username: apiKey,
+      password: apiSecret,
+    }).toString(),
+  });
+
+  const body = await response.text();
+  if (!response.ok) {
+    console.error(`[Datto] API key auth failed: ${response.status} ${body.substring(0, 240)}`);
+    throw new Error(`Falha ao autenticar no Datto via API Key (${response.status}).`);
+  }
+
+  let tokenData: Record<string, unknown>;
+  try {
+    tokenData = JSON.parse(body);
+  } catch {
+    throw new Error("Resposta inválida na autenticação Datto via API Key.");
+  }
+
+  const accessToken = tokenData.access_token as string;
+  const refreshToken = (tokenData.refresh_token as string | undefined) || null;
+  const expiresIn = tokenData.expires_in as number | undefined;
+  if (!accessToken) throw new Error("access_token não retornado na autenticação via API Key.");
+
+  const expiresAt = expiresIn ? new Date(Date.now() + expiresIn * 1000).toISOString() : null;
+
+  if (storedToken) {
+    await supabase
+      .from("datto_oauth_tokens")
+      .update({ access_token: accessToken, refresh_token: refreshToken, expires_at: expiresAt, updated_at: new Date().toISOString() })
+      .eq("id", storedToken.id);
+  } else {
+    await supabase
+      .from("datto_oauth_tokens")
+      .insert({ access_token: accessToken, refresh_token: refreshToken, expires_at: expiresAt });
+  }
+
+  console.log("[Datto] Token via API Key OK. Expira em:", expiresAt);
+  return accessToken;
+}
+
 async function getDattoAccessToken(supabase: any, dattoApiUrl: string): Promise<string> {
   const storedToken = await getStoredToken(supabase);
 
-  if (!storedToken) {
-    throw new Error("Nenhum token Datto encontrado. Autorize o Datto RMM primeiro.");
+  // Token válido em cache
+  if (storedToken && !isTokenExpired(storedToken)) {
+    return storedToken.access_token;
   }
 
-  if (isTokenExpired(storedToken)) {
-    return await refreshAccessToken(supabase, storedToken, dattoApiUrl);
+  // Expirado: tenta refresh_token; se não houver/falhar, cai pra API Key
+  if (storedToken?.refresh_token) {
+    try {
+      return await refreshAccessToken(supabase, storedToken, dattoApiUrl);
+    } catch (e) {
+      console.warn("[Datto] Refresh falhou, tentando API Key:", (e as Error).message);
+    }
   }
 
-  return storedToken.access_token;
+  return await mintTokenWithApiKey(supabase, dattoApiUrl, storedToken);
 }
 
 // --- API calls ---
@@ -295,12 +368,32 @@ Deno.serve(async (req) => {
 
     const { data: assets, error: assetsError } = await supabase
       .from("assets")
-      .select("id, datto_device_uid, datto_device_id, datto_status")
+      .select("id, nome, tipo, datto_device_uid, datto_device_id, datto_status, datto_offline_alerted_at, companies!inner(nome_fantasia, status)")
+      .eq("tipo", "servidor")
+      .eq("companies.status", true)
       .or("datto_device_id.not.is.null,datto_device_uid.not.is.null");
 
     if (assetsError) throw assetsError;
 
-    const now = new Date().toISOString();
+    const alertPhone = "5562999522470";
+
+    async function sendOfflineAlert(asset: { nome: string; tipo: string; companies: { nome_fantasia: string } | null }, isReminder = false) {
+      const empresa = asset.companies?.nome_fantasia || "cliente desconhecido";
+      const tipo = asset.tipo === "servidor" ? "Servidor" : asset.tipo === "desktop" ? "PC" : asset.tipo || "Dispositivo";
+      const msg = isReminder
+        ? `🔴 *DISPOSITIVO AINDA OFFLINE*\n\n🏢 Cliente: ${empresa}\n💻 Dispositivo: ${asset.nome}\n🕐 ${new Date().toLocaleString("pt-BR", { timeZone: "America/Sao_Paulo" })}\n\n_Este dispositivo permanece offline. Verifique imediatamente._`
+        : `⚠️ *ALERTA MONITORAMENTO*\n\n*${tipo} offline detectado!*\n\n🏢 Cliente: ${empresa}\n💻 Dispositivo: ${asset.nome}\n🕐 ${new Date().toLocaleString("pt-BR", { timeZone: "America/Sao_Paulo" })}\n\n_Detectado automaticamente pelo monitoramento Datto._`;
+      try {
+        const result = await sendWabaText(alertPhone, msg, { openTicket: false });
+        console.log(`[Datto] Alerta WhatsApp ${isReminder ? "lembrete" : "inicial"} enviado para ${asset.nome}: ok=${result.ok}`);
+      } catch (e) {
+        console.error("[Datto] Falha ao enviar alerta WhatsApp:", e);
+      }
+    }
+
+    const now = new Date();
+    const nowIso = now.toISOString();
+    const twoHoursAgo = new Date(now.getTime() - 2 * 60 * 60 * 1000).toISOString();
     let onlineCount = 0;
     let offlineCount = 0;
     let unmatchedCount = 0;
@@ -327,10 +420,16 @@ Deno.serve(async (req) => {
       if (isOnline === undefined) {
         unmatchedCount++;
         offlineCount++;
-        await supabase
-          .from("assets")
-          .update({ datto_status: "offline", datto_last_sync: now })
-          .eq("id", asset.id);
+        const shouldAlert = asset.datto_status === "online" ||
+          !asset.datto_offline_alerted_at ||
+          asset.datto_offline_alerted_at < twoHoursAgo;
+        if (shouldAlert) {
+          const isReminder = asset.datto_status === "offline";
+          await sendOfflineAlert(asset as any, isReminder);
+          await supabase.from("assets").update({ datto_status: "offline", datto_last_sync: nowIso, datto_offline_alerted_at: nowIso }).eq("id", asset.id);
+        } else {
+          await supabase.from("assets").update({ datto_status: "offline", datto_last_sync: nowIso }).eq("id", asset.id);
+        }
         continue;
       }
 
@@ -338,10 +437,25 @@ Deno.serve(async (req) => {
       if (isOnline) onlineCount++;
       else offlineCount++;
 
-      await supabase
-        .from("assets")
-        .update({ datto_status: newStatus, datto_last_sync: now })
-        .eq("id", asset.id);
+      if (newStatus === "offline") {
+        const isTransition = asset.datto_status === "online";
+        const needsReminder = !isTransition && (
+          !asset.datto_offline_alerted_at ||
+          asset.datto_offline_alerted_at < twoHoursAgo
+        );
+        if (isTransition || needsReminder) {
+          await sendOfflineAlert(asset as any, !isTransition);
+          await supabase.from("assets").update({ datto_status: newStatus, datto_last_sync: nowIso, datto_offline_alerted_at: nowIso }).eq("id", asset.id);
+        } else {
+          await supabase.from("assets").update({ datto_status: newStatus, datto_last_sync: nowIso }).eq("id", asset.id);
+        }
+      } else {
+        // Voltou online: limpar o controle de alerta
+        if (asset.datto_status === "offline") {
+          console.log(`[Datto] ${asset.nome} voltou online.`);
+        }
+        await supabase.from("assets").update({ datto_status: newStatus, datto_last_sync: nowIso, datto_offline_alerted_at: null }).eq("id", asset.id);
+      }
     }
 
     return new Response(

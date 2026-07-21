@@ -13,11 +13,13 @@ import { Textarea } from "@/components/ui/textarea";
 import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
 import { Progress } from "@/components/ui/progress";
-import { Plus, FileSignature, Clock, AlertTriangle, CheckCircle, Loader2, Building2, Pencil, Trash2 } from "lucide-react";
+import { Plus, FileSignature, Clock, AlertTriangle, CheckCircle, Loader2, Building2, Pencil, Trash2, FileDown, Search } from "lucide-react";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { toast } from "@/hooks/use-toast";
 import { format, differenceInDays, isPast } from "date-fns";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useCNPJLookup } from "@/hooks/useCNPJLookup";
+import { downloadContratoPDF } from "@/lib/contratoPDF";
 
 const contractTypes = [
   { value: "bloco_horas", label: "Bloco de Horas" },
@@ -30,7 +32,11 @@ const defaultForm = {
   company_id: "", tipo: "mensal_fixo", valor_mensal: "", horas_contratadas: "",
   vigencia_inicio: format(new Date(), "yyyy-MM-dd"), vigencia_fim: "",
   renovacao_automatica: false, descricao: "", observacoes: "", status: "ativo",
+  dia_vencimento: "", valor_implantacao: "", representante_legal: "", representante_cpf: "",
+  reajuste_data: "", reajuste_valor: "",
 };
+
+const emptyNewCompany = { cnpj: "", razao_social: "", nome_fantasia: "", endereco: "", telefone: "", email: "" };
 
 const Contracts = () => {
   const { profile } = useAuth();
@@ -40,16 +46,108 @@ const Contracts = () => {
   const [deleteId, setDeleteId] = useState<string | null>(null);
   const [filterStatus, setFilterStatus] = useState("all");
   const [form, setForm] = useState(defaultForm);
+  const [generatingId, setGeneratingId] = useState<string | null>(null);
+
+  // Fluxo "cadastrar nova empresa via CNPJ" dentro do diálogo de contrato
+  const [newCompanyMode, setNewCompanyMode] = useState(false);
+  const [newCompany, setNewCompany] = useState(emptyNewCompany);
+  const { lookupCNPJ, isLoading: cnpjLoading } = useCNPJLookup();
+  const [savingCompany, setSavingCompany] = useState(false);
 
   const isAdmin = profile?.roles?.includes("admin_provedor");
 
   const { data: companies = [] } = useQuery({
     queryKey: ["companies-contracts"],
     queryFn: async () => {
-      const { data } = await supabase.from("companies").select("id, nome_fantasia").eq("status", true).order("nome_fantasia");
+      const { data } = await supabase
+        .from("companies")
+        .select("id, nome_fantasia, razao_social, cnpj, endereco, telefone, email, representante_legal, representante_cpf, sla_primeiro_atendimento_horas")
+        .eq("status", true)
+        .order("nome_fantasia");
       return data || [];
     },
   });
+
+  // Busca CNPJ na Receita e preenche os campos da nova empresa
+  const handleBuscarCNPJ = async () => {
+    const data = await lookupCNPJ(newCompany.cnpj);
+    if (data) {
+      setNewCompany({
+        cnpj: newCompany.cnpj,
+        razao_social: data.razao_social || "",
+        nome_fantasia: data.nome_fantasia || data.razao_social || "",
+        endereco: data.endereco_completo || "",
+        telefone: data.telefone || "",
+        email: data.email || "",
+      });
+      toast({ title: "✓ Dados encontrados", description: "Confira e salve a empresa." });
+    }
+  };
+
+  // Cadastra a empresa e já a seleciona no contrato
+  const handleSalvarEmpresa = async () => {
+    if (!newCompany.nome_fantasia && !newCompany.razao_social) {
+      toast({ title: "Informe ao menos a razão social ou nome fantasia", variant: "destructive" });
+      return;
+    }
+    setSavingCompany(true);
+    try {
+      const { data, error } = await supabase
+        .from("companies")
+        .insert({
+          nome_fantasia: newCompany.nome_fantasia || newCompany.razao_social,
+          razao_social: newCompany.razao_social || null,
+          cnpj: newCompany.cnpj || null,
+          endereco: newCompany.endereco || null,
+          telefone: newCompany.telefone || null,
+          email: newCompany.email || null,
+          status: true,
+          tipo_contrato: "eventual",
+        } as any)
+        .select("id, nome_fantasia, razao_social, cnpj, endereco, telefone, email, representante_legal, representante_cpf, sla_primeiro_atendimento_horas")
+        .single();
+      if (error) throw error;
+      await queryClient.invalidateQueries({ queryKey: ["companies-contracts"] });
+      setForm((f) => ({ ...f, company_id: data.id }));
+      setNewCompanyMode(false);
+      setNewCompany(emptyNewCompany);
+      toast({ title: "Empresa cadastrada!", description: data.nome_fantasia });
+    } catch (e: any) {
+      toast({ title: "Erro ao cadastrar empresa", description: e?.message, variant: "destructive" });
+    } finally {
+      setSavingCompany(false);
+    }
+  };
+
+  // Quando seleciona uma empresa existente, puxa o representante legal já cadastrado
+  const handleSelectCompany = (companyId: string) => {
+    const c = companies.find((x: any) => x.id === companyId);
+    setForm((f) => ({
+      ...f,
+      company_id: companyId,
+      representante_legal: c?.representante_legal || f.representante_legal,
+      representante_cpf: c?.representante_cpf || f.representante_cpf,
+    }));
+  };
+
+  // Gera o PDF do contrato com dados da empresa + contrato
+  const handleGerarPDF = async (contract: any) => {
+    setGeneratingId(contract.id);
+    try {
+      const { data: company, error } = await supabase
+        .from("companies")
+        .select("*")
+        .eq("id", contract.company_id)
+        .single();
+      if (error) throw error;
+      await downloadContratoPDF(contract, company);
+      toast({ title: "Contrato gerado!", description: "O download foi iniciado." });
+    } catch (e: any) {
+      toast({ title: "Erro ao gerar contrato", description: e?.message, variant: "destructive" });
+    } finally {
+      setGeneratingId(null);
+    }
+  };
 
   const { data: contracts = [], isLoading } = useQuery({
     queryKey: ["contracts", filterStatus],
@@ -65,9 +163,12 @@ const Contracts = () => {
   const resetForm = () => {
     setForm(defaultForm);
     setEditingId(null);
+    setNewCompanyMode(false);
+    setNewCompany(emptyNewCompany);
   };
 
   const openEdit = (contract: any) => {
+    const c = companies.find((x: any) => x.id === contract.company_id);
     setForm({
       company_id: contract.company_id,
       tipo: contract.tipo,
@@ -79,6 +180,12 @@ const Contracts = () => {
       descricao: contract.descricao || "",
       observacoes: contract.observacoes || "",
       status: contract.status,
+      dia_vencimento: String(contract.dia_vencimento || ""),
+      valor_implantacao: String(contract.valor_implantacao || ""),
+      representante_legal: c?.representante_legal || "",
+      representante_cpf: c?.representante_cpf || "",
+      reajuste_data: contract.reajuste_data || "",
+      reajuste_valor: String(contract.reajuste_valor || ""),
     });
     setEditingId(contract.id);
     setDialogOpen(true);
@@ -97,17 +204,33 @@ const Contracts = () => {
         descricao: form.descricao || null,
         observacoes: form.observacoes || null,
         status: form.status as any,
+        dia_vencimento: form.dia_vencimento ? parseInt(form.dia_vencimento, 10) : null,
+        valor_implantacao: form.valor_implantacao ? parseFloat(form.valor_implantacao) : null,
+        reajuste_data: form.reajuste_data || null,
+        reajuste_valor: form.reajuste_valor ? parseFloat(form.reajuste_valor) : null,
       };
       if (editingId) {
-        const { error } = await supabase.from("contracts").update(payload).eq("id", editingId);
+        const { error } = await supabase.from("contracts").update(payload as any).eq("id", editingId);
         if (error) throw error;
       } else {
-        const { error } = await supabase.from("contracts").insert(payload);
+        const { error } = await supabase.from("contracts").insert(payload as any);
         if (error) throw error;
+      }
+
+      // Persiste o representante legal na empresa (usado no documento do contrato)
+      if (form.company_id && (form.representante_legal || form.representante_cpf)) {
+        await supabase
+          .from("companies")
+          .update({
+            representante_legal: form.representante_legal || null,
+            representante_cpf: form.representante_cpf || null,
+          } as any)
+          .eq("id", form.company_id);
       }
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["contracts"] });
+      queryClient.invalidateQueries({ queryKey: ["companies-contracts"] });
       setDialogOpen(false);
       resetForm();
       toast({ title: editingId ? "Contrato atualizado!" : "Contrato criado com sucesso!" });
@@ -197,13 +320,50 @@ const Contracts = () => {
               </DialogHeader>
               <div className="space-y-4">
                 <div>
-                  <Label>Empresa *</Label>
-                  <Select value={form.company_id} onValueChange={(v) => setForm({ ...form, company_id: v })}>
-                    <SelectTrigger><SelectValue placeholder="Selecione" /></SelectTrigger>
-                    <SelectContent>
-                      {companies.map((c: any) => <SelectItem key={c.id} value={c.id}>{c.nome_fantasia}</SelectItem>)}
-                    </SelectContent>
-                  </Select>
+                  <div className="flex items-center justify-between">
+                    <Label>Empresa *</Label>
+                    {!editingId && (
+                      <Button type="button" variant="link" size="sm" className="h-auto p-0 text-xs"
+                        onClick={() => setNewCompanyMode((v) => !v)}>
+                        {newCompanyMode ? "Selecionar existente" : "➕ Cadastrar nova via CNPJ"}
+                      </Button>
+                    )}
+                  </div>
+
+                  {!newCompanyMode ? (
+                    <Select value={form.company_id} onValueChange={handleSelectCompany}>
+                      <SelectTrigger><SelectValue placeholder="Selecione" /></SelectTrigger>
+                      <SelectContent>
+                        {companies.map((c: any) => <SelectItem key={c.id} value={c.id}>{c.nome_fantasia}</SelectItem>)}
+                      </SelectContent>
+                    </Select>
+                  ) : (
+                    <div className="mt-2 space-y-2 rounded-md border border-dashed p-3">
+                      <div className="flex gap-2">
+                        <Input placeholder="CNPJ (somente números)" value={newCompany.cnpj}
+                          onChange={(e) => setNewCompany({ ...newCompany, cnpj: e.target.value })} />
+                        <Button type="button" variant="secondary" onClick={handleBuscarCNPJ} disabled={cnpjLoading}>
+                          {cnpjLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Search className="h-4 w-4" />}
+                        </Button>
+                      </div>
+                      <Input placeholder="Razão social" value={newCompany.razao_social}
+                        onChange={(e) => setNewCompany({ ...newCompany, razao_social: e.target.value })} />
+                      <Input placeholder="Nome fantasia" value={newCompany.nome_fantasia}
+                        onChange={(e) => setNewCompany({ ...newCompany, nome_fantasia: e.target.value })} />
+                      <Input placeholder="Endereço" value={newCompany.endereco}
+                        onChange={(e) => setNewCompany({ ...newCompany, endereco: e.target.value })} />
+                      <div className="grid grid-cols-2 gap-2">
+                        <Input placeholder="Telefone" value={newCompany.telefone}
+                          onChange={(e) => setNewCompany({ ...newCompany, telefone: e.target.value })} />
+                        <Input placeholder="E-mail" value={newCompany.email}
+                          onChange={(e) => setNewCompany({ ...newCompany, email: e.target.value })} />
+                      </div>
+                      <Button type="button" size="sm" className="w-full" onClick={handleSalvarEmpresa} disabled={savingCompany}>
+                        {savingCompany ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : <Building2 className="h-4 w-4 mr-2" />}
+                        Cadastrar e selecionar
+                      </Button>
+                    </div>
+                  )}
                 </div>
                 <div className="grid grid-cols-2 gap-3">
                   <div>
@@ -229,6 +389,51 @@ const Contracts = () => {
                 <div className="grid grid-cols-2 gap-3">
                   <div><Label>Início *</Label><Input type="date" value={form.vigencia_inicio} onChange={(e) => setForm({ ...form, vigencia_inicio: e.target.value })} /></div>
                   <div><Label>Fim</Label><Input type="date" value={form.vigencia_fim} onChange={(e) => setForm({ ...form, vigencia_fim: e.target.value })} /></div>
+                </div>
+
+                <div className="rounded-md border bg-muted/30 p-3 space-y-3">
+                  <p className="text-xs font-medium text-muted-foreground flex items-center gap-1.5">
+                    <FileDown className="h-3.5 w-3.5" /> Dados para o documento do contrato (PDF)
+                  </p>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <Label>Dia de vencimento</Label>
+                      <Input type="number" min={1} max={31} placeholder="ex: 10" value={form.dia_vencimento}
+                        onChange={(e) => setForm({ ...form, dia_vencimento: e.target.value })} />
+                    </div>
+                    <div>
+                      <Label>Valor implantação (R$)</Label>
+                      <Input type="number" placeholder="opcional" value={form.valor_implantacao}
+                        onChange={(e) => setForm({ ...form, valor_implantacao: e.target.value })} />
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <Label>Representante legal</Label>
+                      <Input placeholder="Nome do signatário" value={form.representante_legal}
+                        onChange={(e) => setForm({ ...form, representante_legal: e.target.value })} />
+                    </div>
+                    <div>
+                      <Label>CPF do representante</Label>
+                      <Input placeholder="000.000.000-00" value={form.representante_cpf}
+                        onChange={(e) => setForm({ ...form, representante_cpf: e.target.value })} />
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <Label>Reajuste a partir de</Label>
+                      <Input type="date" value={form.reajuste_data}
+                        onChange={(e) => setForm({ ...form, reajuste_data: e.target.value })} />
+                    </div>
+                    <div>
+                      <Label>Novo valor mensal (R$)</Label>
+                      <Input type="number" placeholder="opcional" value={form.reajuste_valor}
+                        onChange={(e) => setForm({ ...form, reajuste_valor: e.target.value })} />
+                    </div>
+                  </div>
+                  <p className="text-[11px] text-muted-foreground">
+                    Preenchendo o reajuste, o documento ganha uma cláusula formal: novo valor mensal vigente a partir da data informada.
+                  </p>
                 </div>
                 {editingId && (
                   <div>
@@ -331,6 +536,10 @@ const Contracts = () => {
                       {isAdmin && (
                         <TableCell>
                           <div className="flex gap-1">
+                            <Button variant="ghost" size="icon" className="h-8 w-8 text-primary" title="Gerar contrato (PDF)"
+                              onClick={() => handleGerarPDF(contract)} disabled={generatingId === contract.id}>
+                              {generatingId === contract.id ? <Loader2 className="h-4 w-4 animate-spin" /> : <FileDown className="h-4 w-4" />}
+                            </Button>
                             <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => openEdit(contract)}>
                               <Pencil className="h-4 w-4" />
                             </Button>

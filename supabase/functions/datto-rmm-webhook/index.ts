@@ -1,4 +1,5 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { sendWabaText } from "../_shared/waba-provider.ts";
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -709,35 +710,21 @@ Reboot Pendente: ${payload.reboot_required ? 'Sim' : 'Não'}`
 
             // Send WhatsApp notification to technician
             try {
-              const MABBIX_BACKEND_URL = Deno.env.get('MABBIX_BACKEND_URL')?.replace('//chat.mabbix.com.br', '//apichat.mabbix.com.br');
-              const MABBIX_CONNECTION_TOKEN = Deno.env.get('MABBIX_CONNECTION_TOKEN');
-              if (MABBIX_BACKEND_URL && MABBIX_CONNECTION_TOKEN) {
-                const whatsappMsg = [
-                  `🔔 *Alerta Datto RMM - Chamado #${ticket.numero}*`,
-                  ``,
-                  `📌 *Dispositivo:* ${payload.device_hostname || 'N/A'}`,
-                  `🏢 *Site:* ${payload.site_name || 'N/A'}`,
-                  `⚠️ *Tipo:* ${payload.alert_type || 'N/A'}`,
-                  `🔴 *Prioridade:* ${payload.alert_priority || 'N/A'}`,
-                  ``,
-                  `💬 *Mensagem:* ${payload.alert_message || 'Sem detalhes'}`,
-                  ``,
-                  `O chamado já foi aberto e atribuído a você. Acesse o sistema para mais detalhes.`,
-                ].join('\n');
+              const whatsappMsg = [
+                `🔔 *Alerta Datto RMM - Chamado #${ticket.numero}*`,
+                ``,
+                `📌 *Dispositivo:* ${payload.device_hostname || 'N/A'}`,
+                `🏢 *Site:* ${payload.site_name || 'N/A'}`,
+                `⚠️ *Tipo:* ${payload.alert_type || 'N/A'}`,
+                `🔴 *Prioridade:* ${payload.alert_priority || 'N/A'}`,
+                ``,
+                `💬 *Mensagem:* ${payload.alert_message || 'Sem detalhes'}`,
+                ``,
+                `O chamado já foi aberto e atribuído a você. Acesse o sistema para mais detalhes.`,
+              ].join('\n');
 
-                await fetch(`${MABBIX_BACKEND_URL}/sendText`, {
-                  method: 'POST',
-                  headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': `Bearer ${MABBIX_CONNECTION_TOKEN}`,
-                  },
-                  body: JSON.stringify({
-                    number: TECNICO_PHONE,
-                    text: whatsappMsg,
-                  }),
-                });
-                console.log(`WhatsApp notification sent to technician for ticket #${ticket.numero}`);
-              }
+              await sendWabaText(TECNICO_PHONE, whatsappMsg, { openTicket: false });
+              console.log(`WhatsApp notification sent to technician for ticket #${ticket.numero}`);
             } catch (waErr) {
               console.error('WhatsApp notification error (non-fatal):', waErr);
             }

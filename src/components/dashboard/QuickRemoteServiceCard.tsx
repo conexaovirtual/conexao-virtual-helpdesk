@@ -17,7 +17,7 @@ export function QuickRemoteServiceCard({ atendimentosHoje, onOpenDialog }: Quick
           </div>
           <div>
             <CardTitle className="text-base text-purple-900 dark:text-purple-100">
-              Atendimento Remoto DATTO
+              Atendimento Remoto NexoRMM
             </CardTitle>
             <p className="text-xs text-purple-600 dark:text-purple-400">
               Suporte via conexão remota

@@ -1,5 +1,6 @@
 import { serve } from "https://deno.land/std@0.190.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { sendWabaText } from "../_shared/waba-provider.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -16,6 +17,27 @@ interface TicketNotificationRequest {
   solicitanteNome: string;
   solicitanteContato: string;
   descricao: string;
+}
+
+// Dedup: a notificação de criação de um chamado deve sair só uma vez.
+async function alreadyNotified(supabase: any, ticketId: string): Promise<boolean> {
+  const { data } = await supabase
+    .from("whatsapp_notification_log")
+    .select("id")
+    .eq("entity_type", "ticket")
+    .eq("entity_id", ticketId)
+    .eq("status", "created")
+    .limit(1);
+  return !!(data && data.length);
+}
+
+async function logNotification(supabase: any, ticketId: string, phone: string | null): Promise<void> {
+  await supabase.from("whatsapp_notification_log").insert({
+    entity_type: "ticket",
+    entity_id: ticketId,
+    status: "created",
+    phone,
+  });
 }
 
 const handler = async (req: Request): Promise<Response> => {
@@ -38,6 +60,19 @@ const handler = async (req: Request): Promise<Response> => {
     }: TicketNotificationRequest = await req.json();
 
     console.log("Notificando novo ticket:", { ticketId, ticketNumero });
+
+    // DEDUP: se este chamado já gerou notificação de criação, não reenvia (evita duplicados).
+    const supabaseDedup = createClient(
+      Deno.env.get("SUPABASE_URL")!,
+      Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
+    );
+    if (await alreadyNotified(supabaseDedup, ticketId)) {
+      console.log(`Skip duplicate ticket-created notification for ${ticketId}`);
+      return new Response(
+        JSON.stringify({ skipped: true, reason: "duplicate ticket notification" }),
+        { status: 200, headers: { "Content-Type": "application/json", ...corsHeaders } }
+      );
+    }
 
     // Buscar email do administrador
     const adminEmail = Deno.env.get("ADMIN_EMAIL") || "admin@example.com";
@@ -249,11 +284,9 @@ const handler = async (req: Request): Promise<Response> => {
 
     // Enviar WhatsApp de confirmação para o solicitante
     try {
-      const MABBIX_BACKEND_URL = Deno.env.get("MABBIX_BACKEND_URL")?.replace("//chat.mabbix.com.br", "//apichat.mabbix.com.br");
-      const MABBIX_CONNECTION_TOKEN = Deno.env.get("MABBIX_CONNECTION_TOKEN");
       const digits = solicitanteContato.replace(/\D/g, "");
 
-      if (MABBIX_BACKEND_URL && MABBIX_CONNECTION_TOKEN && digits.length >= 10) {
+      if (digits.length >= 10) {
         const phone = digits.startsWith("55") && digits.length >= 12 ? digits : `55${digits}`;
 
         const mensagem =
@@ -267,20 +300,16 @@ const handler = async (req: Request): Promise<Response> => {
           `Nossa equipe técnica já foi notificada e entrará em contato em breve.\n\n` +
           `_Conexão Virtual Soluções Tecnológicas_`;
 
-        await fetch(`${MABBIX_BACKEND_URL}/api/messages/send`, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${MABBIX_CONNECTION_TOKEN}`,
-          },
-          body: JSON.stringify({ number: phone, openTicket: "0", queueId: "0", body: mensagem }),
-        }).catch(e => console.error("WhatsApp confirmation error:", e));
+        await sendWabaText(phone, mensagem, { openTicket: false }).catch(e => console.error("WhatsApp confirmation error:", e));
 
         console.log(`WhatsApp confirmation sent to ${phone} for ticket #${ticketNumero}`);
       }
     } catch (waErr) {
       console.error("Error sending WhatsApp confirmation:", waErr);
     }
+
+    // Registra a notificação deste chamado para deduplicar reenvios futuros.
+    await logNotification(supabaseDedup, ticketId, null);
 
     return new Response(JSON.stringify({ success: true, emailResponse: data }), {
       status: 200,

@@ -20,10 +20,11 @@ import { AIExecutionReport } from "@/components/ai/AIExecutionReport";
 import { GeolocationCapture } from "@/components/ui/GeolocationCapture";
 import { UploadedImage } from "@/lib/imageUtils";
 import { toast } from "sonner";
-import { Loader2, MessageCircle, Phone, MapPin, FileDown, Monitor, Plus } from "lucide-react";
+import { Loader2, MessageCircle, Phone, MapPin, FileDown, Monitor, Plus, Receipt } from "lucide-react";
 import { QuickAssetDialog } from "@/components/assets/QuickAssetDialog";
 import { format } from "date-fns";
 import { exportSingleDailyServiceToPDF } from "@/lib/exportSingleDailyService";
+import { OrcamentoDialog } from "@/components/orcamentos/OrcamentoDialog";
 
 const canalEnum = z.union([
   z.literal("whatsapp"),
@@ -70,6 +71,7 @@ interface DailyServiceRecordDialogProps {
   onOpenChange: (open: boolean) => void;
   onSuccess?: () => void;
   recordId?: string;
+  defaultCompanyId?: string;
 }
 
 export function DailyServiceRecordDialog({
@@ -77,13 +79,18 @@ export function DailyServiceRecordDialog({
   onOpenChange,
   onSuccess,
   recordId,
+  defaultCompanyId,
 }: DailyServiceRecordDialogProps) {
   const { profile } = useAuth();
   const [loading, setLoading] = useState(false);
   const [companies, setCompanies] = useState<any[]>([]);
   const [quickAssetOpen, setQuickAssetOpen] = useState(false);
+  const [isOrcamentoOpen, setIsOrcamentoOpen] = useState(false);
+  const [recordData, setRecordData] = useState<any>(null);
   const [assets, setAssets] = useState<any[]>([]);
   const [pendingAssetId, setPendingAssetId] = useState<string | null>(null);
+  // Status com que o registro foi carregado, para só notificar quando ele mudar.
+  const [originalStatus, setOriginalStatus] = useState<string | null>(null);
   const [uploadedImages, setUploadedImages] = useState<UploadedImage[]>([]);
   const [enderecoCliente, setEnderecoCliente] = useState("");
   const [gpsLocal, setGpsLocal] = useState<GeoPosition | null>(null);
@@ -125,6 +132,11 @@ export function DailyServiceRecordDialog({
       } else {
         setGpsLocal(null);
         setEnderecoCliente("");
+        // Pré-seleciona a empresa quando aberto a partir do Meu Dia
+        if (defaultCompanyId) {
+          form.setValue("company_id", defaultCompanyId);
+          loadAssets(defaultCompanyId);
+        }
       }
       // Auto-capturar localização ao abrir o dialog
       if (!recordId) {
@@ -133,7 +145,7 @@ export function DailyServiceRecordDialog({
         });
       }
     }
-  }, [open, recordId]);
+  }, [open, recordId, defaultCompanyId]);
 
   const loadCompanies = async () => {
     try {
@@ -177,7 +189,7 @@ export function DailyServiceRecordDialog({
     try {
       const { data, error } = await supabase
         .from("daily_service_records")
-        .select("*")
+        .select("*, companies:company_id(id, nome_fantasia, cnpj, whatsapp, telefone, bomcontrole_cliente_id)")
         .eq("id", recordId)
         .maybeSingle();
 
@@ -190,6 +202,8 @@ export function DailyServiceRecordDialog({
       }
 
       if (data) {
+        setRecordData(data);
+
         // Store the asset_id to apply after assets load
         const recordAssetId = data.asset_id || "";
         
@@ -210,6 +224,8 @@ export function DailyServiceRecordDialog({
           status: data.status as "em_andamento" | "concluido" | "pendente",
           observacoes: data.observacoes || "",
         });
+        // Guarda o status original para só notificar o cliente se ele mudar.
+        setOriginalStatus(data.status);
         
         // Queue asset_id to be set once assets are loaded
         if (recordAssetId) {
@@ -292,9 +308,13 @@ export function DailyServiceRecordDialog({
 
         if (error) throw error;
         toast.success("Atendimento atualizado com sucesso!");
-        
-        // Notificar cliente via WhatsApp sobre mudança de status
-        notifyClientAboutDailyRecord(recordId, data.status, data.solucao);
+
+        // Notificar cliente via WhatsApp APENAS quando o status mudou de fato.
+        // (Salvar edições sem trocar o status não dispara mais mensagem.)
+        if (data.status !== originalStatus) {
+          notifyClientAboutDailyRecord(recordId, data.status, data.solucao);
+          setOriginalStatus(data.status);
+        }
         
         // Gerar artigo de conhecimento ao concluir com solução
         if (data.status === 'concluido' && data.solucao?.trim()) {
@@ -331,6 +351,7 @@ export function DailyServiceRecordDialog({
   };
 
   return (
+    <>
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
         <DialogHeader>
@@ -563,7 +584,7 @@ export function DailyServiceRecordDialog({
                         </FormControl>
                         <FormLabel className="font-normal flex items-center gap-2">
                           <Monitor className="h-4 w-4 text-purple-600" />
-                          Acesso Remoto (DATTO)
+                          Acesso Remoto (NexoRMM)
                         </FormLabel>
                       </FormItem>
                     </RadioGroup>
@@ -738,6 +759,16 @@ export function DailyServiceRecordDialog({
             )}
 
             <DialogFooter>
+              {recordId && (
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={() => setIsOrcamentoOpen(true)}
+                >
+                  <Receipt className="h-4 w-4 mr-2" />
+                  Orçamento
+                </Button>
+              )}
               {recordId && form.watch('status') === 'concluido' && (
                 <Button
                   type="button"
@@ -788,5 +819,19 @@ export function DailyServiceRecordDialog({
         </Form>
       </DialogContent>
     </Dialog>
+
+    {recordId && (
+      <OrcamentoDialog
+        open={isOrcamentoOpen}
+        onOpenChange={setIsOrcamentoOpen}
+        dailyServiceRecordId={recordId}
+        serviceOrder={{
+          numero_os: recordData?.titulo || 'Atendimento',
+          companies: recordData?.companies,
+        }}
+        onSuccess={loadRecord}
+      />
+    )}
+  </>
   );
 }

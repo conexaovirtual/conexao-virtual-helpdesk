@@ -9,6 +9,12 @@ interface GeolocationCaptureProps {
   error: string | null;
   onCapture: () => void;
   disabled?: boolean;
+  /** Texto do botão antes de ter posição. Padrão: "Capturar GPS". */
+  captureLabel?: string;
+  /** Texto do botão quando já há posição. Padrão: "Recapturar". */
+  recaptureLabel?: string;
+  /** Texto do botão durante o carregamento. Padrão: "Capturando...". */
+  loadingLabel?: string;
 }
 
 function StaticMapPreview({ latitude, longitude }: { latitude: number; longitude: number }) {
@@ -47,6 +53,9 @@ export function GeolocationCapture({
   error,
   onCapture,
   disabled,
+  captureLabel = 'Capturar GPS',
+  recaptureLabel = 'Recapturar',
+  loadingLabel = 'Capturando...',
 }: GeolocationCaptureProps) {
   return (
     <div className="flex flex-col gap-2 rounded-lg border p-3 bg-muted/30">
@@ -65,17 +74,17 @@ export function GeolocationCapture({
           {loading ? (
             <>
               <Loader2 className="h-3 w-3 mr-1 animate-spin" />
-              Capturando...
+              {loadingLabel}
             </>
           ) : position ? (
             <>
               <CheckCircle className="h-3 w-3 mr-1 text-green-600" />
-              Recapturar
+              {recaptureLabel}
             </>
           ) : (
             <>
               <MapPin className="h-3 w-3 mr-1" />
-              Capturar GPS
+              {captureLabel}
             </>
           )}
         </Button>

@@ -112,7 +112,7 @@ serve(async (req) => {
       }))
     };
 
-    // Chamar Lovable AI Gateway
+    // Chamar OpenAI
     const aiResponse = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: {

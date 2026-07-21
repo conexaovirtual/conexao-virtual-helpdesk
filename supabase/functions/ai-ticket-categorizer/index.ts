@@ -32,14 +32,20 @@ serve(async (req: Request) => {
 
     console.log('Processando transcrição:', transcription);
 
-    // Usar Lovable AI (Gemini Flash) para categorização
-    const response = await fetch('https://llm.lovable.dev/v1/chat/completions', {
+    const openaiApiKey = Deno.env.get('OPENAI_API_KEY');
+    if (!openaiApiKey) {
+      throw new Error('OPENAI_API_KEY não configurada');
+    }
+
+    // Usar OpenAI (gpt-4o-mini) para categorização
+    const response = await fetch('https://api.openai.com/v1/chat/completions', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
+        'Authorization': `Bearer ${openaiApiKey}`,
       },
       body: JSON.stringify({
-        model: 'google/gemini-2.5-flash',
+        model: 'gpt-4o-mini',
         messages: [
           {
             role: 'system',
@@ -88,7 +94,7 @@ Responda APENAS com um objeto JSON válido no seguinte formato:
 
     if (!response.ok) {
       const errorText = await response.text();
-      console.error('Erro na API Lovable AI:', errorText);
+      console.error('Erro na API OpenAI:', errorText);
       throw new Error('Falha na chamada à IA');
     }
 

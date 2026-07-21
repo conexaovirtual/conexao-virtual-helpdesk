@@ -39,6 +39,12 @@ import {
   Wifi,
   Route,
   Map,
+  Gauge,
+  CalendarCheck,
+  Smile,
+  Tags,
+  Hammer,
+  Receipt,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { useQuery } from "@tanstack/react-query";
@@ -80,17 +86,22 @@ export function AppSidebar() {
     { title: "Dashboard", url: "/dashboard", icon: LayoutDashboard, show: true },
     { title: "Painel Operacional", url: "/operational", icon: Activity, show: isAdminOrTech },
     { title: "Agenda", url: "/agenda", icon: CalendarDays, show: true },
+    { title: "Meu Dia", url: "/meu-dia", icon: CalendarCheck, show: isAdminOrTech },
     { title: "Chamados", url: "/tickets", icon: Ticket, show: isAdminOrTech, badge: newTicketsCount },
     { title: "Atendimentos", url: "/daily-services", icon: ClipboardList, show: isAdminOrTech },
     { title: "Empresas", url: "/companies", icon: Building2, show: isAdminOrTech },
     { title: "Rotas", url: "/route-planner", icon: Route, show: isAdminOrTech },
     { title: "Mapa", url: "/company-map", icon: Map, show: isAdminOrTech },
+    { title: "Deslocamento", url: "/deslocamento", icon: Gauge, show: isAdminOrTech },
     { title: "Ordens de Serviço", url: "/reports?tab=service-orders", icon: FileText, show: true },
   ];
 
   const resourceItems = [
     { title: "Ativos", url: "/assets", icon: Package, show: true },
     { title: "Inventário", url: "/inventory", icon: PackageSearch, show: true },
+    { title: "Produtos", url: "/produtos", icon: Tags, show: isAdminOrTech },
+    { title: "Serviços", url: "/servicos", icon: Hammer, show: isAdminOrTech },
+    { title: "Propostas", url: "/propostas", icon: Receipt, show: isAdminOrTech || isGestor },
     { title: "Base de Conhecimento", url: "/knowledge-base", icon: BookOpen, show: true },
     { title: "Chat Interno", url: "/chat", icon: MessageCircle, show: true },
     { title: "Projetos", url: "/projects", icon: FolderKanban, show: true },
@@ -103,6 +114,7 @@ export function AppSidebar() {
   const adminItems = [
     { title: "Relatórios", url: "/reports", icon: FileBarChart, show: isAdminOrTech || isGestor },
     { title: "Analytics", url: "/analytics", icon: BarChart3, show: isAdmin },
+    { title: "Satisfação", url: "/csat", icon: Smile, show: isAdminOrTech },
     { title: "Técnicos", url: "/technicians", icon: Wrench, show: isAdmin },
     { title: "WhatsApp", url: "/whatsapp-platform", icon: MessageSquare, show: isAdminOrTech },
   ];

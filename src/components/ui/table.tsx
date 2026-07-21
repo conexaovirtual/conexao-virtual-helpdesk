@@ -1,13 +1,54 @@
 import * as React from "react";
 
 import { cn } from "@/lib/utils";
+import { useIsMobile } from "@/hooks/use-mobile";
 
 const Table = React.forwardRef<HTMLTableElement, React.HTMLAttributes<HTMLTableElement>>(
-  ({ className, ...props }, ref) => (
-    <div className="relative w-full overflow-auto">
-      <table ref={ref} className={cn("w-full caption-bottom text-sm", className)} {...props} />
-    </div>
-  ),
+  ({ className, ...props }, ref) => {
+    const isMobile = useIsMobile();
+    const innerRef = React.useRef<HTMLTableElement>(null);
+    React.useImperativeHandle(ref, () => innerRef.current as HTMLTableElement);
+
+    // No mobile, transforma cada linha em um "cartão" rotulando as células com o
+    // texto do cabeçalho correspondente (via data-label). Funciona para qualquer
+    // tabela da plataforma sem precisar editar cada página.
+    React.useEffect(() => {
+      if (!isMobile) return;
+      const table = innerRef.current;
+      if (!table) return;
+
+      const sync = () => {
+        const headers = Array.from(table.querySelectorAll(":scope > thead th")).map(
+          (th) => (th as HTMLElement).innerText.trim(),
+        );
+        table.querySelectorAll(":scope > tbody > tr").forEach((tr) => {
+          Array.from(tr.children).forEach((cell, i) => {
+            const td = cell as HTMLElement;
+            const label = headers[i];
+            // Células com colspan (estados de "carregando"/"vazio") não recebem rótulo.
+            if (label && td.colSpan <= 1) td.dataset.label = label;
+            else td.removeAttribute("data-label");
+          });
+        });
+      };
+
+      sync();
+      const observer = new MutationObserver(sync);
+      observer.observe(table, { childList: true, subtree: true, characterData: true });
+      return () => observer.disconnect();
+    }, [isMobile]);
+
+    return (
+      <div className="relative w-full overflow-auto">
+        <table
+          ref={innerRef}
+          data-responsive-card={isMobile ? "" : undefined}
+          className={cn("w-full caption-bottom text-sm", className)}
+          {...props}
+        />
+      </div>
+    );
+  },
 );
 Table.displayName = "Table";
 

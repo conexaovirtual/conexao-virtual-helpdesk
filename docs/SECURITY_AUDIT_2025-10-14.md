@@ -336,5 +336,5 @@ O sistema Help Desk TI agora possui:
 ---
 
 **Auditoria realizada em:** 14 de Outubro de 2025  
-**Auditor:** Lovable AI Security Review  
+**Auditor:** Revisão automatizada de segurança  
 **Versão do sistema:** 2.0 (pós-correções críticas)

@@ -78,11 +78,18 @@ export function CompanyWhatsAppContacts({ companyId }: CompanyWhatsAppContactsPr
 
     const digits = newPhone.replace(/\D/g, '');
     if (digits.length < 10) {
-      toast({ title: 'Número inválido', description: 'Informe um número com DDD', variant: 'destructive' });
+      toast({ title: 'Número inválido', description: 'Informe um número com DDD, ou o ID do grupo', variant: 'destructive' });
       return;
     }
 
-    const phone = digits.startsWith('55') && digits.length >= 12 ? digits : `55${digits}`;
+    // IDs de grupo do WhatsApp têm 15+ dígitos e não levam o "55" do Brasil
+    // na frente — só normaliza como telefone de verdade quando é curto o
+    // suficiente pra ser um número de celular real.
+    const phone = digits.length >= 14
+      ? digits
+      : digits.startsWith('55') && digits.length >= 12
+        ? digits
+        : `55${digits}`;
 
     setSaving(true);
     try {
@@ -219,14 +226,14 @@ export function CompanyWhatsAppContacts({ companyId }: CompanyWhatsAppContactsPr
               />
             </div>
             <div className="space-y-2">
-              <Label>Número WhatsApp *</Label>
+              <Label>Número WhatsApp ou ID do grupo *</Label>
               <Input
-                placeholder="(11) 99999-9999"
+                placeholder="(11) 99999-9999 ou ID do grupo"
                 value={newPhone}
                 onChange={(e) => setNewPhone(e.target.value)}
               />
               <p className="text-xs text-muted-foreground">
-                Informe o número com DDD. O código do país (55) será adicionado automaticamente.
+                Número com DDD (o código do país 55 é adicionado automaticamente) ou o ID de um grupo do WhatsApp.
               </p>
             </div>
           </div>

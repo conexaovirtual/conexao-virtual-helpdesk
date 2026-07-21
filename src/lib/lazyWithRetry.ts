@@ -14,7 +14,7 @@ export function lazyWithRetry<T extends ComponentType<any>>(
   factory: () => Promise<{ default: T }>
 ) {
   return lazy(async () => {
-    const reloadKey = 'lovable:chunk-reloaded';
+    const reloadKey = 'cv:chunk-reloaded';
     try {
       const mod = await factory();
       // success — clear the flag for future failures

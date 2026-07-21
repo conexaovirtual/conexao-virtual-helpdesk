@@ -177,7 +177,7 @@ export function DattoMonitoringPanel() {
   const loadData = async (showSkeleton = false) => {
     if (showSkeleton) setLoading(true);
     const [devicesResult, alertsResult] = await Promise.all([
-      supabase.from('assets').select('datto_status').not('datto_device_id', 'is', null),
+      supabase.from('assets').select('datto_status').not('nexo_device_id', 'is', null),
       supabase.from('datto_alerts_log')
         .select('id, device_hostname, alert_type, alert_message, alert_priority, ticket_id, created_at')
         .order('created_at', { ascending: false }).limit(5),
@@ -249,7 +249,7 @@ export function DattoMonitoringPanel() {
       const { data, error } = await supabase.functions.invoke('datto-oauth-callback', { body: { code, redirect_uri: redirectUri } });
       if (error) throw new Error(error.message || 'Erro ao trocar código');
       if (!data?.success) throw new Error('Falha ao salvar token');
-      toast.success('Datto RMM autorizado com sucesso!');
+      toast.success('NexoRMM autorizado com sucesso!');
       handleSync();
     } catch (err: any) {
       toast.error(err.message || 'Erro ao completar autorização');
@@ -306,27 +306,10 @@ export function DattoMonitoringPanel() {
         <div className="flex items-center justify-between flex-wrap gap-2">
           <div className="flex items-center gap-2">
             <Activity className="h-5 w-5 text-blue-600" />
-            <CardTitle className="text-base">Monitoramento Datto RMM</CardTitle>
+            <CardTitle className="text-base">Monitoramento NexoRMM</CardTitle>
           </div>
           <div className="flex items-center gap-2 flex-wrap">
-            <Button variant="outline" size="sm" onClick={handleAuthorize} disabled={isAuthorizing} className="text-xs">
-              <KeyRound className="h-3 w-3 mr-1" />
-              {isAuthorizing ? 'Autorizando...' : 'Autorizar'}
-            </Button>
-            <Button variant="outline" size="sm" onClick={handleSync} disabled={isSyncing} className="text-xs">
-              <RefreshCw className={`h-3 w-3 mr-1 ${isSyncing ? 'animate-spin' : ''}`} />
-              Sincronizar
-            </Button>
-            <Button
-              variant="default"
-              size="sm"
-              onClick={handleFullSync}
-              disabled={isFullSyncing}
-              className="text-xs bg-blue-600 hover:bg-blue-700"
-            >
-              <ScanSearch className={`h-3 w-3 mr-1 ${isFullSyncing ? 'animate-pulse' : ''}`} />
-              {isFullSyncing ? 'Varrendo...' : 'Varredura Completa'}
-            </Button>
+            <span className="text-xs text-muted-foreground">Sincroniza automaticamente</span>
             {total > 0 && (
               <Badge variant="outline" className="text-xs">{total} dispositivos</Badge>
             )}
@@ -358,7 +341,7 @@ export function DattoMonitoringPanel() {
             <div className="grid grid-cols-2 sm:grid-cols-5 gap-2 text-xs">
               <div className="text-center p-2 rounded bg-background">
                 <p className="text-lg font-bold">{syncReport.total}</p>
-                <p className="text-muted-foreground">Total Datto</p>
+                <p className="text-muted-foreground">Total NexoRMM</p>
               </div>
               <div className="text-center p-2 rounded bg-background">
                 <p className="text-lg font-bold text-blue-600">{syncReport.updated}</p>
@@ -420,7 +403,7 @@ export function DattoMonitoringPanel() {
             {showDeleted && syncReport.deletedOrphans && syncReport.deletedOrphans.length > 0 && (
               <div className="border-t border-red-200 dark:border-red-800 pt-2">
                 <p className="text-xs font-medium text-red-700 dark:text-red-300 mb-2">
-                  Ativos removidos — sem correspondência no Datto ({syncReport.deletedOrphans.length})
+                  Ativos removidos — sem correspondência no NexoRMM ({syncReport.deletedOrphans.length})
                 </p>
                 <ScrollArea className="max-h-48">
                   <div className="space-y-1">
@@ -514,38 +497,11 @@ export function DattoMonitoringPanel() {
               </div>
             </div>
 
-            {recentAlerts.length > 0 && (
-              <div className="space-y-2">
-                <p className="text-sm font-medium text-muted-foreground">Alertas Recentes</p>
-                {recentAlerts.map((alert) => (
-                  <div key={alert.id} className="flex items-center justify-between p-2 rounded border text-sm">
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-center gap-2">
-                        <span className="font-medium truncate">{alert.device_hostname || 'Desconhecido'}</span>
-                        <Badge variant={alert.alert_priority === 'critical' ? 'destructive' : 'secondary'} className="text-xs">
-                          {alert.alert_priority}
-                        </Badge>
-                      </div>
-                      <p className="text-xs text-muted-foreground truncate">
-                        {alert.alert_type}: {alert.alert_message}
-                      </p>
-                      <p className="text-xs text-muted-foreground">
-                        {formatDistanceToNow(new Date(alert.created_at), { addSuffix: true, locale: ptBR })}
-                      </p>
-                    </div>
-                    {alert.ticket_id && (
-                      <Button variant="ghost" size="sm" onClick={() => navigate(`/tickets/${alert.ticket_id}`)}>
-                        <ExternalLink className="h-3 w-3" />
-                      </Button>
-                    )}
-                  </div>
-                ))}
-              </div>
-            )}
+            {/* Alertas do NexoRMM aparecem como chamados (menu Chamados) e no painel do NexoRMM. */}
           </>
         ) : (
           <p className="text-sm text-muted-foreground text-center py-4">
-            Clique em "Autorizar" para conectar ao Datto RMM e depois "Sincronizar".
+            As máquinas do NexoRMM aparecem aqui automaticamente conforme o agente é instalado.
           </p>
         )}
       </CardContent>

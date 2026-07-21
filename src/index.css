@@ -172,3 +172,63 @@ All colors MUST be HSL.
     border: 0;
   }
 }
+
+/* === Tabelas responsivas: viram cartões no celular (< 768px) ===
+   Ativado pelo atributo data-responsive-card, que o componente Table só
+   adiciona no mobile. Os rótulos vêm do data-label injetado pelo componente. */
+@media (max-width: 767px) {
+  table[data-responsive-card] thead {
+    display: none;
+  }
+
+  table[data-responsive-card] tbody {
+    display: block;
+  }
+
+  table[data-responsive-card] tbody > tr {
+    display: block;
+    margin-bottom: 0.75rem;
+    padding: 0.25rem 0.25rem;
+    border: 1px solid hsl(var(--border));
+    border-radius: var(--radius);
+    background: hsl(var(--card));
+  }
+
+  table[data-responsive-card] tbody > tr > td {
+    display: block;
+    position: relative;
+    padding: 0.45rem 0.75rem 0.45rem 42%;
+    text-align: left;
+    border: 0 !important;
+    min-height: 2.25rem;
+  }
+
+  table[data-responsive-card] tbody > tr > td::before {
+    content: attr(data-label);
+    position: absolute;
+    left: 0.75rem;
+    top: 0.45rem;
+    width: 36%;
+    padding-right: 0.5rem;
+    font-weight: 500;
+    color: hsl(var(--muted-foreground));
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  /* Sem rótulo (tabela sem cabeçalho): não deixa vão vazio à esquerda. */
+  table[data-responsive-card] tbody > tr > td:not([data-label]):not([colspan]) {
+    padding-left: 0.75rem;
+  }
+
+  /* Estados de "carregando"/"vazio" (colspan) ocupam a linha inteira, centralizados. */
+  table[data-responsive-card] tbody > tr > td[colspan] {
+    padding: 1rem 0.75rem;
+    text-align: center;
+  }
+
+  table[data-responsive-card] tbody > tr > td[colspan]::before {
+    display: none;
+  }
+}
