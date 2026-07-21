@@ -584,7 +584,7 @@ export function DailyServiceRecordDialog({
                         </FormControl>
                         <FormLabel className="font-normal flex items-center gap-2">
                           <Monitor className="h-4 w-4 text-purple-600" />
-                          Acesso Remoto (DATTO)
+                          Acesso Remoto (NexoRMM)
                         </FormLabel>
                       </FormItem>
                     </RadioGroup>

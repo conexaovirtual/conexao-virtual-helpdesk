@@ -222,18 +222,26 @@ export async function generateContratoPDF(contract: any, company: any): Promise<
   // --- 5. PAGAMENTO -----------------------------------------------------------
   titulo("5. DA FORMA DE PAGAMENTO");
   const diaVenc = contract?.dia_vencimento || "____";
+  let cl5 = 0;
   paragrafo(
-    `5.1. O pagamento dos serviços, objeto deste contrato, será efetuado por boleto bancário com vencimento todo ` +
+    `5.${++cl5}. O pagamento dos serviços, objeto deste contrato, será efetuado por boleto bancário com vencimento todo ` +
       `dia ${diaVenc} de cada mês, no valor mensal de ${fmtMoeda(contract?.valor_mensal)}.`
   );
+  if (contract?.reajuste_valor && Number(contract.reajuste_valor) > 0 && contract?.reajuste_data) {
+    paragrafo(
+      `5.${++cl5}. Fica desde já ajustado entre as partes que, a partir de ${fmtData(contract.reajuste_data)}, ` +
+        `o valor mensal dos serviços passará a ser de ${fmtMoeda(Number(contract.reajuste_valor))}, ` +
+        "independentemente da celebração de termo aditivo, permanecendo inalteradas as demais condições deste contrato."
+    );
+  }
   if (contract?.valor_implantacao && contract.valor_implantacao > 0) {
     paragrafo(
-      `5.2. O pagamento da instalação e implantação dos serviços, no valor de ${fmtMoeda(contract.valor_implantacao)}, ` +
+      `5.${++cl5}. O pagamento da instalação e implantação dos serviços, no valor de ${fmtMoeda(contract.valor_implantacao)}, ` +
         "será realizado em parcela única, 10 (dez) dias após o início dos trabalhos."
     );
   }
   paragrafo(
-    "5.3. O atraso no pagamento de qualquer parcela acarretará multa de 2% (dois por cento) sobre o valor em atraso, " +
+    `5.${++cl5}. O atraso no pagamento de qualquer parcela acarretará multa de 2% (dois por cento) sobre o valor em atraso, ` +
       "acrescida de juros de mora de 1% (um por cento) ao mês, calculados pro rata die."
   );
 

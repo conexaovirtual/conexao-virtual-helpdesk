@@ -121,7 +121,6 @@ export function ServiceOrderDetailDialog({
       });
 
       onUpdate?.();
-      onOpenChange(false);
     } catch (error: any) {
       console.error("Erro ao atualizar status:", error);
       toast({

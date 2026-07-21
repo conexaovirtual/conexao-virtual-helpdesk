@@ -33,6 +33,7 @@ const defaultForm = {
   vigencia_inicio: format(new Date(), "yyyy-MM-dd"), vigencia_fim: "",
   renovacao_automatica: false, descricao: "", observacoes: "", status: "ativo",
   dia_vencimento: "", valor_implantacao: "", representante_legal: "", representante_cpf: "",
+  reajuste_data: "", reajuste_valor: "",
 };
 
 const emptyNewCompany = { cnpj: "", razao_social: "", nome_fantasia: "", endereco: "", telefone: "", email: "" };
@@ -183,6 +184,8 @@ const Contracts = () => {
       valor_implantacao: String(contract.valor_implantacao || ""),
       representante_legal: c?.representante_legal || "",
       representante_cpf: c?.representante_cpf || "",
+      reajuste_data: contract.reajuste_data || "",
+      reajuste_valor: String(contract.reajuste_valor || ""),
     });
     setEditingId(contract.id);
     setDialogOpen(true);
@@ -203,6 +206,8 @@ const Contracts = () => {
         status: form.status as any,
         dia_vencimento: form.dia_vencimento ? parseInt(form.dia_vencimento, 10) : null,
         valor_implantacao: form.valor_implantacao ? parseFloat(form.valor_implantacao) : null,
+        reajuste_data: form.reajuste_data || null,
+        reajuste_valor: form.reajuste_valor ? parseFloat(form.reajuste_valor) : null,
       };
       if (editingId) {
         const { error } = await supabase.from("contracts").update(payload as any).eq("id", editingId);
@@ -414,6 +419,21 @@ const Contracts = () => {
                         onChange={(e) => setForm({ ...form, representante_cpf: e.target.value })} />
                     </div>
                   </div>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <Label>Reajuste a partir de</Label>
+                      <Input type="date" value={form.reajuste_data}
+                        onChange={(e) => setForm({ ...form, reajuste_data: e.target.value })} />
+                    </div>
+                    <div>
+                      <Label>Novo valor mensal (R$)</Label>
+                      <Input type="number" placeholder="opcional" value={form.reajuste_valor}
+                        onChange={(e) => setForm({ ...form, reajuste_valor: e.target.value })} />
+                    </div>
+                  </div>
+                  <p className="text-[11px] text-muted-foreground">
+                    Preenchendo o reajuste, o documento ganha uma cláusula formal: novo valor mensal vigente a partir da data informada.
+                  </p>
                 </div>
                 {editingId && (
                   <div>

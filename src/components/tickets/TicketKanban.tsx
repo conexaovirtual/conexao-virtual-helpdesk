@@ -13,6 +13,20 @@ import { ptBR } from "date-fns/locale";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
 
+function formatSlaRemaining(ms: number): string {
+  if (ms <= 0) {
+    const abs = Math.abs(ms);
+    const h = Math.floor(abs / 3600000);
+    const m = Math.floor((abs % 3600000) / 60000);
+    return h > 0 ? `${h}h ${m}m atrasado` : `${m}m atrasado`;
+  }
+  const h = Math.floor(ms / 3600000);
+  const m = Math.floor((ms % 3600000) / 60000);
+  if (h >= 24) return `${Math.floor(h / 24)}d ${h % 24}h restantes`;
+  if (h > 0) return `${h}h ${m}m restantes`;
+  return `${m}m restantes`;
+}
+
 const KANBAN_COLUMNS = [
   { id: "novo", label: "Novo", color: "bg-blue-500" },
   { id: "em_atendimento", label: "Em Atendimento", color: "bg-amber-500" },
@@ -43,6 +57,7 @@ export function TicketKanban() {
   const [error, setError] = useState<string | null>(null);
   const [draggedTicket, setDraggedTicket] = useState<string | null>(null);
   const [dragOverColumn, setDragOverColumn] = useState<string | null>(null);
+  const [now, setNow] = useState(() => new Date());
   const channelRef = useRef<ReturnType<typeof supabase.channel> | null>(null);
 
   const loadTickets = useCallback(async () => {
@@ -72,6 +87,11 @@ export function TicketKanban() {
     }
     setLoading(false);
   }, [profile]);
+
+  useEffect(() => {
+    const timer = setInterval(() => setNow(new Date()), 60000);
+    return () => clearInterval(timer);
+  }, []);
 
   useEffect(() => {
     if (!profile) return;
@@ -156,14 +176,14 @@ export function TicketKanban() {
   };
 
   const getSLAIndicator = (ticket: KanbanTicket) => {
-    if (!ticket.sla_solucao_limite) return null;
-    const now = new Date();
+    if (!ticket.sla_solucao_limite || ticket.status === "fechado") return null;
     const limite = new Date(ticket.sla_solucao_limite);
     const diff = limite.getTime() - now.getTime();
-    const hoursLeft = diff / (1000 * 60 * 60);
-    if (diff < 0) return { label: "SLA violado", violated: true };
-    if (hoursLeft < 2) return { label: `${Math.round(hoursLeft)}h restante`, violated: false };
-    return null;
+    const hoursLeft = diff / 3600000;
+    if (diff < 0) return { level: "violated" as const, label: formatSlaRemaining(diff) };
+    if (hoursLeft < 1) return { level: "critical" as const, label: formatSlaRemaining(diff) };
+    if (hoursLeft < 4) return { level: "warning" as const, label: formatSlaRemaining(diff) };
+    return { level: "ok" as const, label: formatSlaRemaining(diff) };
   };
 
   const getColumnTickets = (columnId: string) => tickets.filter((t) => t.status === columnId);
@@ -233,11 +253,21 @@ export function TicketKanban() {
                       onDragStart={(e) => handleDragStart(e, ticket.id)}
                       onClick={() => navigate(`/tickets/${ticket.id}`)}
                       className={cn(
-                        "p-3 cursor-grab active:cursor-grabbing hover:shadow-md transition-all border select-none",
+                        "p-3 cursor-grab active:cursor-grabbing hover:shadow-md transition-all border select-none overflow-hidden relative",
                         draggedTicket === ticket.id && "opacity-50 scale-95",
-                        sla?.violated && "border-red-300 dark:border-red-800",
+                        sla?.level === "violated" && "border-red-300 dark:border-red-800",
+                        sla?.level === "critical" && "border-orange-300 dark:border-orange-800",
                       )}
                     >
+                      {sla && (
+                        <div className={cn(
+                          "absolute left-0 top-0 bottom-0 w-1",
+                          sla.level === "violated" && "bg-red-500",
+                          sla.level === "critical" && "bg-orange-500",
+                          sla.level === "warning" && "bg-amber-400",
+                          sla.level === "ok" && "bg-emerald-400",
+                        )} />
+                      )}
                       <div className="flex items-start justify-between gap-2 mb-2">
                         <span className="text-xs font-mono text-muted-foreground">#{ticket.numero}</span>
                         <GripVertical className="h-3.5 w-3.5 text-muted-foreground/40 shrink-0" />
@@ -254,13 +284,13 @@ export function TicketKanban() {
                         >
                           {ticket.prioridade}
                         </span>
-                        {sla && (
+                        {sla && sla.level !== "ok" && (
                           <span
                             className={cn(
                               "text-[10px] px-1.5 py-0.5 rounded font-medium flex items-center gap-1",
-                              sla.violated
-                                ? "bg-red-100 text-red-700 dark:bg-red-950 dark:text-red-300"
-                                : "bg-amber-100 text-amber-700 dark:bg-amber-950 dark:text-amber-300",
+                              sla.level === "violated" && "bg-red-100 text-red-700 dark:bg-red-950 dark:text-red-300",
+                              sla.level === "critical" && "bg-orange-100 text-orange-700 dark:bg-orange-950 dark:text-orange-300",
+                              sla.level === "warning" && "bg-amber-100 text-amber-700 dark:bg-amber-950 dark:text-amber-300",
                             )}
                           >
                             <AlertCircle className="h-3 w-3" />

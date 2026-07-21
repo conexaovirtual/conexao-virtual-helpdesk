@@ -13,6 +13,7 @@ import { useToast } from "@/hooks/use-toast";
 import { useGeolocation } from "@/hooks/useGeolocation";
 import { GeolocationCapture } from "@/components/ui/GeolocationCapture";
 import { DailyServiceRecordDialog } from "@/components/daily-records/DailyServiceRecordDialog";
+import { StopDialog } from "@/components/displacement/StopDialog";
 import { useDisplacementReport } from "@/hooks/useDisplacementReport";
 import {
   CalendarCheck,
@@ -25,6 +26,7 @@ import {
   CalendarClock,
   CheckCircle2,
   Wrench,
+  Package,
 } from "lucide-react";
 
 // Haversine (km)
@@ -83,6 +85,11 @@ export default function MeuDia() {
   const [registerCompanyId, setRegisterCompanyId] = useState<string | null>(null);
   const [registerStop, setRegisterStop] = useState<Stop | null>(null);
   const [registerOpen, setRegisterOpen] = useState(false);
+  const [stopOpen, setStopOpen] = useState(false);
+
+  const handleStopSaved = () => {
+    queryClient.invalidateQueries({ queryKey: ["displacement-report"] });
+  };
 
   const openRegister = (stop: Stop | null) => {
     setRegisterStop(stop);
@@ -139,7 +146,7 @@ export default function MeuDia() {
   const { data: stops = [], isLoading } = useQuery<Stop[]>({
     queryKey: ["meu-dia", date, profile?.id],
     queryFn: async () => {
-      const [osRes, visitRes, apptRes, doneRes] = await Promise.all([
+      const [osRes, visitRes, apptRes, doneRes, compRes] = await Promise.all([
         supabase
           .from("service_orders")
           .select(
@@ -169,7 +176,30 @@ export default function MeuDia() {
           )
           .eq("data_atendimento", date)
           .eq("tecnico_id", profile!.id),
+        supabase.from("companies").select("id, nome_fantasia, endereco, latitude, longitude"),
       ]);
+
+      // Compromisso digitado como texto livre (sem empresa vinculada): tenta herdar
+      // o GPS da empresa cujo nome aparece no título (ex.: "FGL LUMINOSOS").
+      const companiesList = (compRes.data || []) as Array<{
+        id: string;
+        nome_fantasia: string | null;
+        endereco: string | null;
+        latitude: number | null;
+        longitude: number | null;
+      }>;
+      const matchCompany = (title: string | null) => {
+        const t = (title || "").toLowerCase();
+        if (!t) return null;
+        let best: (typeof companiesList)[number] | null = null;
+        for (const c of companiesList) {
+          const nm = (c.nome_fantasia || "").trim().toLowerCase();
+          if (nm.length >= 4 && t.includes(nm)) {
+            if (!best || nm.length > (best.nome_fantasia || "").trim().length) best = c;
+          }
+        }
+        return best;
+      };
 
       const items: Stop[] = [];
       (osRes.data || []).forEach((o: any) => {
@@ -203,17 +233,19 @@ export default function MeuDia() {
         });
       });
       (apptRes.data || []).forEach((a: any) => {
+        // usa a empresa vinculada; se não houver, tenta casar pelo título
+        const linked = a.companies || matchCompany(a.title);
         items.push({
           key: `appt-${a.id}`,
           type: "compromisso",
           sourceId: a.id,
           time: a.appointment_time ? a.appointment_time.substring(0, 5) : null,
           title: a.title || "Compromisso",
-          company: a.companies?.nome_fantasia || "",
-          companyId: a.companies?.id ?? null,
-          address: a.companies?.endereco || null,
-          lat: a.companies?.latitude ?? null,
-          lon: a.companies?.longitude ?? null,
+          company: linked?.nome_fantasia || "",
+          companyId: linked?.id ?? null,
+          address: linked?.endereco || null,
+          lat: linked?.latitude ?? null,
+          lon: linked?.longitude ?? null,
           done: a.status === "concluido",
         });
       });
@@ -329,8 +361,12 @@ export default function MeuDia() {
     window.open(url, "_blank");
   };
 
+  // Atendimento remoto (🖥️) não tem local de propósito — não conta como "sem GPS".
+  const isRemoto = (s: Stop) => s.title.startsWith("🖥️");
+  const semGps = (s: Stop) => !isRemoto(s) && (s.lat == null || s.lon == null);
+
   const doneCount = stops.filter((s) => s.done).length;
-  const semGpsCount = stops.filter((s) => s.lat == null || s.lon == null).length;
+  const semGpsCount = stops.filter(semGps).length;
 
   return (
     <div className="bg-background min-h-screen">
@@ -360,6 +396,9 @@ export default function MeuDia() {
               <div className="flex-1" />
               <Button onClick={optimize} disabled={stops.length < 2} variant="secondary" className="gap-2">
                 <RouteIcon className="h-4 w-4" /> Otimizar rota
+              </Button>
+              <Button onClick={() => setStopOpen(true)} variant="secondary" className="gap-2">
+                <Package className="h-4 w-4" /> Registrar parada
               </Button>
               <Button onClick={() => openRegister(null)} className="gap-2">
                 <Wrench className="h-4 w-4" /> Registrar atendimento
@@ -393,17 +432,19 @@ export default function MeuDia() {
             )}
             {semGpsCount > 0 && (
               <p className="text-xs text-amber-600">
-                {semGpsCount} parada(s) sem GPS não entram na rota — capture a localização na empresa.
+                {semGpsCount} parada(s) marcada(s) com <strong>“sem GPS”</strong> abaixo não entram na rota — a
+                empresa não tem localização cadastrada. Cadastre o GPS dela em Empresas (botão de localização) ou
+                capture estando no local.
               </p>
             )}
           </CardContent>
         </Card>
 
-        {resumo && resumo.atendimentos > 0 && (
+        {resumo && (resumo.atendimentos > 0 || resumo.paradas > 0) && (
           <Card>
             <CardContent className="p-4">
-              <p className="text-xs uppercase tracking-wide text-muted-foreground mb-2">Resumo do dia (visitas realizadas)</p>
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+              <p className="text-xs uppercase tracking-wide text-muted-foreground mb-2">Resumo do dia (visitas e paradas)</p>
+              <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
                 <div>
                   <p className="text-xs text-muted-foreground">Distância</p>
                   <p className="text-lg font-semibold">{fmtKm(resumo.km)}</p>
@@ -419,6 +460,10 @@ export default function MeuDia() {
                 <div>
                   <p className="text-xs text-muted-foreground">Visitas</p>
                   <p className="text-lg font-semibold">{resumo.atendimentos}</p>
+                </div>
+                <div>
+                  <p className="text-xs text-muted-foreground">Paradas</p>
+                  <p className="text-lg font-semibold">{resumo.paradas}</p>
                 </div>
               </div>
               <p className="text-[11px] text-muted-foreground mt-2">
@@ -459,6 +504,11 @@ export default function MeuDia() {
                           </Badge>
                           {s.time && <span className="text-xs font-medium">{s.time}</span>}
                           {s.done && <CheckCircle2 className="h-3.5 w-3.5 text-green-600" />}
+                          {semGps(s) && (
+                            <Badge variant="outline" className="gap-1 border-amber-500 text-amber-600">
+                              <MapPin className="h-3 w-3" /> sem GPS
+                            </Badge>
+                          )}
                         </div>
                         <p className="text-sm font-medium mt-1 break-words">{s.title}</p>
                         {s.company && (
@@ -514,6 +564,16 @@ export default function MeuDia() {
         defaultCompanyId={registerCompanyId || undefined}
         onSuccess={handleRegistered}
       />
+
+      {profile && (
+        <StopDialog
+          open={stopOpen}
+          onOpenChange={setStopOpen}
+          tecnicoId={profile.id}
+          date={date}
+          onSuccess={handleStopSaved}
+        />
+      )}
     </div>
   );
 }

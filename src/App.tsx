@@ -39,7 +39,6 @@ const CostCenter = lazyWithRetry(() => import("./pages/CostCenter"));
 const Contracts = lazyWithRetry(() => import("./pages/Contracts"));
 const CMDB = lazyWithRetry(() => import("./pages/CMDB"));
 const NetworkMonitor = lazyWithRetry(() => import("./pages/NetworkMonitor"));
-const DattoCallback = lazyWithRetry(() => import("./pages/DattoCallback"));
 const OperationalDashboard = lazyWithRetry(() => import("./pages/OperationalDashboard"));
 const RoutePlanner = lazyWithRetry(() => import("./pages/RoutePlanner"));
 const Deslocamento = lazyWithRetry(() => import("./pages/Deslocamento"));
@@ -90,7 +89,6 @@ const App = () => (
             <Route path="/" element={<Index />} />
             <Route path="/auth" element={<Auth />} />
             <Route path="/public/ticket" element={<PublicTicket />} />
-            <Route path="/datto-callback" element={<DattoCallback />} />
             <Route path="/orcamento/:id/print" element={<OrcamentoPrint />} />
 
             {/* Standalone WhatsApp app window (no sidebar/header chrome) — for PWA/Dock install */}
