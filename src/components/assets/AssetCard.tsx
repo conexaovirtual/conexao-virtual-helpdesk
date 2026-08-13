@@ -26,6 +26,7 @@ import {
 } from '@/components/ui/alert-dialog';
 import { useState } from 'react';
 import { AssetLabelPrint } from './AssetLabelPrint';
+import { buildAssetQrData } from '@/lib/assetQrCode';
 
 interface AssetCardProps {
   asset: any;
@@ -45,17 +46,12 @@ export function AssetCard({ asset, onEdit, onDelete }: AssetCardProps) {
   const canDelete = profile?.roles?.includes('admin_provedor') || false;
   const canViewDetails = profile?.roles?.some(r => ['admin_provedor', 'gestor_cliente'].includes(r)) || false;
 
-  // Check if we're in preview environment
-  const isPreviewEnv = window.location.hostname.includes('preview') ||
-                       window.location.hostname.includes('localhost');
-  
-  // Use production URL from env if available, otherwise fall back to origin
-  const productionUrl = import.meta.env.VITE_PUBLIC_URL || window.location.origin;
-
   const handleViewQR = async () => {
     try {
-      // Generate QR code URL para abertura de chamado público - always use production URL
-      const qrData = `${productionUrl}/public/ticket?asset=${asset.id}&token=${asset.qrcode_token}`;
+      // Mesmo formato de QR usado na etiqueta impressa (buildAssetQrData) —
+      // José pediu unificar (05/08/2026): só um QR pra cliente E técnico,
+      // não mais dois formatos diferentes confundindo quem escaneia.
+      const qrData = buildAssetQrData(asset);
       const qrCodeUrl = await QRCode.toDataURL(qrData, {
         width: 300,
         margin: 2,
@@ -247,11 +243,6 @@ export function AssetCard({ asset, onEdit, onDelete }: AssetCardProps) {
           <DialogTitle>QR Code do Ativo</DialogTitle>
         </DialogHeader>
         <div className="space-y-4">
-          {isPreviewEnv && (
-            <div className="bg-amber-100 dark:bg-amber-900/30 border border-amber-300 dark:border-amber-700 rounded-md p-3 text-sm text-amber-800 dark:text-amber-200">
-              <strong>Atenção:</strong> Você está no ambiente de preview. Teste o QR Code na versão publicada do app para acesso público sem login.
-            </div>
-          )}
           <div className="flex justify-center p-4 bg-white rounded-lg">
             {qrCodeUrl && (
               <img src={qrCodeUrl} alt="QR Code" className="w-64 h-64" />
