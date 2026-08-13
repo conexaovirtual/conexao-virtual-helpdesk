@@ -143,7 +143,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
         .from('service_orders')
         .select('hora_agendada, data_agendada')
         .eq('modalidade', 'presencial')
-        .in('status', ['agendada', 'em_andamento'])
+        .in('status', ['agendada', 'em_execucao'])
         .gte('data_agendada', `${dateStr}T00:00:00`)
         .lte('data_agendada', `${dateStr}T23:59:59`);
 

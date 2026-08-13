@@ -12,8 +12,9 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { useToast } from "@/hooks/use-toast";
 import { format } from "date-fns";
 import { ptBR } from "date-fns/locale";
-import { ChevronDown, ChevronUp, Plus } from "lucide-react";
+import { ChevronDown, ChevronUp, Plus, QrCode } from "lucide-react";
 import { QuickAssetDialog } from "@/components/assets/QuickAssetDialog";
+import { AssetQRScannerDialog } from "@/components/assets/AssetQRScannerDialog";
 
 const formSchema = z.object({
   company_id: z.string().min(1, "Selecione uma empresa"),
@@ -56,6 +57,7 @@ export function ServiceOrderCreateDialog({
   const [loading, setLoading] = useState(false);
   const [showMore, setShowMore] = useState(false);
   const [isQuickAssetOpen, setIsQuickAssetOpen] = useState(false);
+  const [isScannerOpen, setIsScannerOpen] = useState(false);
   const [loadingCompanies, setLoadingCompanies] = useState(false);
   const [loadingAssets, setLoadingAssets] = useState(false);
   const [companies, setCompanies] = useState<any[]>([]);
@@ -168,6 +170,27 @@ export function ServiceOrderCreateDialog({
     }
   };
 
+  // Ao escanear o QR da etiqueta (mesmo padrão colado nas máquinas — ver
+  // AssetLabelPrint.tsx), pré-preenche empresa+ativo igual a um link
+  // ?assetId= já faz hoje. Usa await em vez de fire-and-forget aqui pra
+  // garantir que o asset_id seja setado DEPOIS que loadCompanyDetails zera
+  // esse campo (ela reseta asset_id ao trocar de empresa) — senão a
+  // ordem de resolução das duas promises corre risco de sobrescrever.
+  const handleScan = async (assetId: string) => {
+    const { data } = await supabase.from("assets").select("company_id, nome").eq("id", assetId).maybeSingle();
+    if (!data?.company_id) {
+      toast({ title: "Ativo não encontrado", description: "Esse QR code não corresponde a um ativo cadastrado.", variant: "destructive" });
+      return;
+    }
+    form.setValue("company_id", data.company_id);
+    const company = companies.find((c) => c.id === data.company_id);
+    if (company) setSelectedCompany(company);
+    await loadCompanyDetails(data.company_id);
+    await loadAssets(data.company_id);
+    form.setValue("asset_id", assetId);
+    toast({ title: "Ativo identificado!", description: data.nome });
+  };
+
   const onSubmit = async (values: z.infer<typeof formSchema>) => {
     setLoading(true);
     try {
@@ -246,8 +269,15 @@ export function ServiceOrderCreateDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-lg max-h-[90vh] overflow-y-auto">
         <DialogHeader>
-          <DialogTitle>Nova Ordem de Serviço</DialogTitle>
-          <DialogDescription>Informe o cliente, equipamento e o problema a resolver.</DialogDescription>
+          <div className="flex items-start justify-between gap-2">
+            <div>
+              <DialogTitle>Nova Ordem de Serviço</DialogTitle>
+              <DialogDescription>Informe o cliente, equipamento e o problema a resolver.</DialogDescription>
+            </div>
+            <Button type="button" variant="outline" size="sm" className="gap-1.5 shrink-0" onClick={() => setIsScannerOpen(true)}>
+              <QrCode className="h-4 w-4" /> Escanear QR
+            </Button>
+          </div>
         </DialogHeader>
 
         <Form {...form}>
@@ -539,6 +569,8 @@ export function ServiceOrderCreateDialog({
           </form>
         </Form>
       </DialogContent>
+
+      <AssetQRScannerDialog open={isScannerOpen} onOpenChange={setIsScannerOpen} onScan={handleScan} />
 
       {isQuickAssetOpen && watchedCompanyId && (
         <QuickAssetDialog

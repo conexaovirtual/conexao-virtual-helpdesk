@@ -20,8 +20,9 @@ import { AIExecutionReport } from "@/components/ai/AIExecutionReport";
 import { GeolocationCapture } from "@/components/ui/GeolocationCapture";
 import { UploadedImage } from "@/lib/imageUtils";
 import { toast } from "sonner";
-import { Loader2, MessageCircle, Phone, MapPin, FileDown, Monitor, Plus, Receipt } from "lucide-react";
+import { Loader2, MessageCircle, Phone, MapPin, FileDown, Monitor, Plus, Receipt, QrCode } from "lucide-react";
 import { QuickAssetDialog } from "@/components/assets/QuickAssetDialog";
+import { AssetQRScannerDialog } from "@/components/assets/AssetQRScannerDialog";
 import { format } from "date-fns";
 import { exportSingleDailyServiceToPDF } from "@/lib/exportSingleDailyService";
 import { OrcamentoDialog } from "@/components/orcamentos/OrcamentoDialog";
@@ -85,6 +86,7 @@ export function DailyServiceRecordDialog({
   const [loading, setLoading] = useState(false);
   const [companies, setCompanies] = useState<any[]>([]);
   const [quickAssetOpen, setQuickAssetOpen] = useState(false);
+  const [scannerOpen, setScannerOpen] = useState(false);
   const [isOrcamentoOpen, setIsOrcamentoOpen] = useState(false);
   const [recordData, setRecordData] = useState<any>(null);
   const [assets, setAssets] = useState<any[]>([]);
@@ -181,6 +183,25 @@ export function DailyServiceRecordDialog({
       console.error("Error loading assets:", error);
       setAssets([]);
     }
+  };
+
+  // Ao escanear o QR da etiqueta colada na máquina (mesmo padrão de
+  // AssetLabelPrint.tsx): essa tela, ao contrário de ServiceOrderCreateDialog,
+  // não tinha lógica nenhuma de derivar empresa a partir do ativo — só aceitava
+  // empresa pré-selecionada. Reaproveita o mesmo padrão pendingAssetId já usado
+  // pelo QuickAssetDialog (aplica o ativo só depois que a lista carregar).
+  const handleScan = async (assetId: string) => {
+    const { data } = await supabase.from("assets").select("company_id, nome").eq("id", assetId).maybeSingle();
+    if (!data?.company_id) {
+      toast.error("Esse QR code não corresponde a um ativo cadastrado.");
+      return;
+    }
+    form.setValue("company_id", data.company_id);
+    loadAssets(data.company_id);
+    setPendingAssetId(assetId);
+    const { data: company } = await supabase.from("companies").select("endereco").eq("id", data.company_id).maybeSingle();
+    setEnderecoCliente(company?.endereco || "");
+    toast.success(`Ativo identificado: ${data.nome}`);
   };
 
   const loadRecord = async () => {
@@ -355,12 +376,21 @@ export function DailyServiceRecordDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
         <DialogHeader>
-          <DialogTitle>
-            {recordId ? "Editar Atendimento" : "Novo Atendimento Diário"}
-          </DialogTitle>
-          <DialogDescription>
-            Registre os detalhes do atendimento realizado
-          </DialogDescription>
+          <div className="flex items-start justify-between gap-2">
+            <div>
+              <DialogTitle>
+                {recordId ? "Editar Atendimento" : "Novo Atendimento Diário"}
+              </DialogTitle>
+              <DialogDescription>
+                Registre os detalhes do atendimento realizado
+              </DialogDescription>
+            </div>
+            {!recordId && (
+              <Button type="button" variant="outline" size="sm" className="gap-1.5 shrink-0" onClick={() => setScannerOpen(true)}>
+                <QrCode className="h-4 w-4" /> Escanear QR
+              </Button>
+            )}
+          </div>
         </DialogHeader>
 
         <Form {...form}>
@@ -459,6 +489,8 @@ export function DailyServiceRecordDialog({
                 </FormItem>
               )}
             />
+
+            <AssetQRScannerDialog open={scannerOpen} onOpenChange={setScannerOpen} onScan={handleScan} />
 
             <QuickAssetDialog
               open={quickAssetOpen}
