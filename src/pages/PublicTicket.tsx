@@ -94,20 +94,10 @@ export default function PublicTicket() {
       setCreatedTicket(ticket);
       setSuccess(true);
 
+      // Sem notify-ticket-created aqui de propósito: cliente não deve ser
+      // avisado por WhatsApp na simples abertura do chamado, só quando um
+      // técnico faz atendimento de verdade (decisão José, 28/07/2026).
       await Promise.allSettled([
-        supabase.functions.invoke("notify-ticket-created", {
-          body: {
-            ticketId: ticket.id,
-            ticketNumero: ticket.numero,
-            assetNome: asset.nome,
-            assetTipo: asset.tipo,
-            assetTag: asset.tag_patrimonial,
-            companyNome: company.nome_fantasia,
-            solicitanteNome: formData.nome,
-            solicitanteContato: formData.contato,
-            descricao: formData.descricao,
-          },
-        }),
         supabase.functions.invoke("ai-auto-response", {
           body: { ticket_id: ticket.id, descricao: formData.descricao },
         }),

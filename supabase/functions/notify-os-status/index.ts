@@ -8,12 +8,13 @@ const corsHeaders = {
     "authorization, x-client-info, apikey, content-type, x-supabase-client-platform, x-supabase-client-platform-version, x-supabase-client-runtime, x-supabase-client-runtime-version",
 };
 
+// SEM 'executada'/'finalizada' de propósito (decisão José, 28/07/2026): cliente
+// não deve receber WhatsApp nenhum quando o atendimento/chamado é CONCLUÍDO —
+// só nas etapas de agendamento/execução em andamento. Ver [[conexao-virtual-stack]].
 const statusMessages: Record<string, string> = {
   agendada: "📅 *Ordem de Serviço Criada*\n\nSua OS #{numero_os} foi registrada e está agendada. Em breve um técnico entrará em contato para confirmação.",
   confirmada: "✅ *Ordem de Serviço Confirmada*\n\nSua OS #{numero_os} foi confirmada pelo técnico e será atendida em breve.",
   em_execucao: "🔧 *Atendimento Iniciado*\n\nO técnico iniciou o atendimento da sua OS #{numero_os}. Acompanharemos você até a conclusão.",
-  executada: "📋 *Atendimento Realizado*\n\nO atendimento da OS #{numero_os} foi concluído. Estamos finalizando os registros.",
-  finalizada: "🎉 *Ordem de Serviço Finalizada*\n\nSua OS #{numero_os} foi finalizada com sucesso! Se precisar de algo mais, estamos à disposição.",
   cancelada: "❌ *Ordem de Serviço Cancelada*\n\nA OS #{numero_os} foi cancelada. Se tiver dúvidas, entre em contato conosco.",
 };
 

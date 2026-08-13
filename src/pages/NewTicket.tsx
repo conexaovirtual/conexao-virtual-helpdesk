@@ -407,19 +407,13 @@ export default function NewTicket() {
         description: `Chamado #${data.numero} foi registrado`,
       });
 
-      // Automações fire-and-forget: triagem IA + notificação
+      // Automação fire-and-forget: só triagem IA. NÃO notifica o cliente na
+      // abertura do chamado — decisão do José (28/07/2026): cliente só deve
+      // ser avisado quando um técnico faz atendimento de verdade (OS/registro
+      // diário), nunca na simples abertura/criação do chamado.
       const runAutomations = async () => {
         await Promise.allSettled([
           supabase.functions.invoke("ai-ticket-triage", { body: { ticket_id: data.id } }),
-          supabase.functions.invoke("notify-ticket-created", {
-            body: {
-              ticketId: data.id,
-              ticketNumero: data.numero,
-              companyNome: "",
-              solicitanteNome: profile?.nome || "",
-              descricao: formData.descricao,
-            },
-          }),
         ]);
       };
       runAutomations().catch(console.error);
