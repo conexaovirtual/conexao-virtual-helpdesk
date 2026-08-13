@@ -9,9 +9,23 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { toast } from "sonner";
 import { Loader2 } from "lucide-react";
-import { authSchema } from "@/lib/validations";
+import { authSchema, loginSchema } from "@/lib/validations";
 import { zxcvbn } from "@zxcvbn-ts/core";
 import { PasswordStrengthIndicator } from "@/components/auth/PasswordStrengthIndicator";
+
+// Extrai uma mensagem legível de um erro do Zod. O código antigo checava
+// `error.errors` (API do Zod v3) — a versão instalada é Zod v4, que renomeou
+// pra `error.issues` e não tem mais `.errors`. Sem isso, o guard sempre
+// falhava e caía no fallback `error.message`, que pra um ZodError é o JSON
+// bruto de todos os issues serializado — literalmente o texto quebrado que
+// aparecia na tela em vez de uma mensagem normal. Achado real: 05/08/2026.
+function zodMessage(error: any, fallback: string): string {
+  const issues = error?.issues || error?.errors;
+  if (Array.isArray(issues) && issues.length > 0 && issues[0]?.message) {
+    return issues[0].message;
+  }
+  return error?.message || fallback;
+}
 
 export default function Auth() {
   const navigate = useNavigate();
@@ -37,7 +51,9 @@ export default function Auth() {
     setLoading(true);
 
     try {
-      const validatedData = authSchema.parse({ email, password });
+      // Login usa loginSchema (só checa formato/preenchido) — NUNCA
+      // authSchema (que reavalia força de senha, coisa de cadastro).
+      const validatedData = loginSchema.parse({ email, password });
 
       const { error } = await supabase.auth.signInWithPassword({
         email: validatedData.email,
@@ -55,11 +71,7 @@ export default function Auth() {
 
       navigate(redirectUrl || "/dashboard");
     } catch (error: any) {
-      if (error.errors) {
-        toast.error(error.errors[0]?.message || "Dados inválidos");
-      } else {
-        toast.error(error.message || "Erro ao fazer login");
-      }
+      toast.error(zodMessage(error, "Erro ao fazer login"));
     } finally {
       setLoading(false);
     }
@@ -88,11 +100,7 @@ export default function Auth() {
       setPassword("");
       setNome("");
     } catch (error: any) {
-      if (error.errors) {
-        toast.error(error.errors[0]?.message || "Dados inválidos");
-      } else {
-        toast.error(error.message || "Erro ao criar conta");
-      }
+      toast.error(zodMessage(error, "Erro ao criar conta"));
     } finally {
       setLoading(false);
     }

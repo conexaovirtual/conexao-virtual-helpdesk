@@ -6,6 +6,43 @@ const corsHeaders = {
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type, x-supabase-client-platform, x-supabase-client-platform-version, x-supabase-client-runtime, x-supabase-client-runtime-version',
 };
 
+// Busca semântica na wiki interna (tabela wiki_pages, alimentada pelo BookStack).
+// Sem restrição de tag: esta função atende o TÉCNICO dentro do chamado, então
+// pode ver a wiki inteira. (A Miya, que fala com cliente, usa somente_cliente.)
+async function buscarNaWiki(
+  supabase: any,
+  openaiApiKey: string,
+  pergunta: string,
+): Promise<Array<{ titulo: string; url: string; conteudo: string }>> {
+  try {
+    const resp = await fetch("https://api.openai.com/v1/embeddings", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${openaiApiKey}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ model: "text-embedding-3-small", input: pergunta.slice(0, 8000) }),
+    });
+    if (!resp.ok) throw new Error(`embeddings ${resp.status}`);
+    const vec = (await resp.json()).data[0].embedding;
+
+    const { data, error } = await supabase.rpc("match_wiki_pages", {
+      query_embedding: vec,
+      match_count: 3,
+      match_threshold: 0.3,
+      p_somente_cliente: false,
+    });
+    if (error) throw error;
+    return (data ?? []).map((p: any) => ({
+      titulo: p.titulo,
+      url: p.url,
+      conteudo: String(p.conteudo ?? "").slice(0, 1500),
+    }));
+  } catch (e) {
+    // Wiki indisponível não pode derrubar a sugestão: ela é um reforço, e o
+    // histórico de chamados sozinho já produz resposta útil.
+    console.error("[ai-solution-suggester] busca na wiki falhou:", e);
+    return [];
+  }
+}
+
 serve(async (req) => {
   if (req.method === 'OPTIONS') {
     return new Response('ok', { headers: corsHeaders });
@@ -132,6 +169,11 @@ serve(async (req) => {
       ...(similarRecords || []),
     ].slice(0, 20);
 
+    // Documentação da wiki interna relacionada ao problema
+    const paginasWiki = await buscarNaWiki(
+      supabase, openaiApiKey, `${titulo}\n${descricao}\n${comments}`,
+    );
+
     // Chamar OpenAI
     const aiResponse = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
@@ -168,7 +210,10 @@ OBSERVAÇÕES/COMENTÁRIOS:
 ${comments || 'Nenhuma observação'}
 
 SOLUÇÕES DE ATENDIMENTOS SIMILARES ANTERIORES:
-${allSimilar.map((t: any, i: number) => `${i + 1}. Problema: ${t.titulo}\n   Solução: ${t.solucao}`).join('\n\n') || 'Nenhum histórico encontrado'}`
+${allSimilar.map((t: any, i: number) => `${i + 1}. Problema: ${t.titulo}\n   Solução: ${t.solucao}`).join('\n\n') || 'Nenhum histórico encontrado'}
+
+DOCUMENTAÇÃO DA WIKI INTERNA (procedimento já validado pela equipe — prefira isto quando bater com o caso):
+${paginasWiki.map((p, i) => `${i + 1}. ${p.titulo}\n${p.conteudo}`).join('\n\n') || 'Nenhuma página relacionada'}`
           }
         ],
         temperature: 0.5,
@@ -194,9 +239,15 @@ ${allSimilar.map((t: any, i: number) => `${i + 1}. Problema: ${t.titulo}\n   Sol
 
     console.log('[ai-solution-suggester] Sugestão gerada para:', ticket_id || daily_record_id);
 
-    return new Response(JSON.stringify({ suggestion }), {
-      headers: { ...corsHeaders, "Content-Type": "application/json" },
-    });
+    return new Response(
+      JSON.stringify({
+        suggestion,
+        // Para a tela mostrar "de onde veio": links das páginas da wiki que
+        // embasaram a sugestão.
+        wiki: paginasWiki.map((p) => ({ titulo: p.titulo, url: p.url })),
+      }),
+      { headers: { ...corsHeaders, "Content-Type": "application/json" } },
+    );
 
   } catch (error: any) {
     console.error('[ai-solution-suggester] Error:', error);

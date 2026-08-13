@@ -59,60 +59,39 @@ export function TechnicianDialog({ open, onOpenChange, onSuccess }: TechnicianDi
     setLoading(true);
 
     try {
-      // Verificar se o email já existe
-      const { data, error: searchError } = await supabase.auth.admin.listUsers();
-      
-      if (searchError) {
-        console.error('Error checking existing users:', searchError);
-      } else if (data?.users) {
-        const existingUser = data.users.find((u: any) => u.email === formData.email);
-        if (existingUser) {
-          toast.error('Este email já está cadastrado no sistema');
-          setLoading(false);
-          return;
-        }
-      }
-
-      // Create user with metadata - the trigger will handle profile and role creation
-      const { error: authError } = await supabase.auth.signUp({
-        email: formData.email,
-        password: formData.password,
-        options: {
-          data: {
-            nome: formData.nome,
-            telefone: formData.telefone,
-            company_id: formData.company_id || null, // null = todas as empresas
-            role: 'tecnico',
-          },
+      // supabase.auth.signUp() (autocadastro) SEMPRE exige confirmação de
+      // e-mail, mesmo criado pelo admin — foi por isso que o técnico Mayks
+      // ficou sem conseguir logar (achado real 05/08/2026). A function usa
+      // admin.createUser com email_confirm:true (só dá pra fazer com
+      // service_role, por isso precisa ser uma edge function, não direto
+      // do browser).
+      const { data, error: fnError } = await supabase.functions.invoke('create-technician', {
+        body: {
+          nome: formData.nome,
+          email: formData.email,
+          telefone: formData.telefone,
+          password: formData.password,
+          company_id: formData.company_id || null,
         },
       });
 
-      if (authError) throw authError;
+      if (fnError) throw fnError;
+      if (data?.error) throw new Error(data.error);
 
-      const companyText = formData.company_id 
-        ? 'Vinculado a uma empresa específica' 
+      const companyText = formData.company_id
+        ? 'Vinculado a uma empresa específica'
         : 'Acesso a todas as empresas';
-      
+
       toast.success(`Técnico ${formData.nome} cadastrado com sucesso!`, {
-        description: companyText
+        description: `${companyText} — já pode fazer login direto, sem precisar confirmar e-mail.`
       });
-      
+
       setFormData({ nome: '', email: '', telefone: '', password: '', company_id: '' });
       onOpenChange(false);
       onSuccess();
     } catch (error: any) {
       console.error('Error creating technician:', error);
-      
-      // Mensagens específicas por tipo de erro
-      if (error.message?.includes('already registered') || error.message?.includes('User already registered')) {
-        toast.error('Email já cadastrado. Use outro email.');
-      } else if (error.message?.includes('Invalid email')) {
-        toast.error('Email inválido. Verifique o formato.');
-      } else if (error.message?.includes('Password') || error.message?.includes('password')) {
-        toast.error('Senha muito fraca. Use pelo menos 6 caracteres.');
-      } else {
-        toast.error(error.message || 'Erro ao cadastrar técnico');
-      }
+      toast.error(error.message || 'Erro ao cadastrar técnico');
     } finally {
       setLoading(false);
     }

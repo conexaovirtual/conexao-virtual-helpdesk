@@ -60,7 +60,7 @@ serve(async (req) => {
       if (ticket.assets) ativoInfo = `${ticket.assets.tipo} - ${ticket.assets.nome}`;
     }
 
-    // Verificar se já existe artigo para esta fonte
+    // Verificar se já existe artigo publicado OU proposta pendente/aplicada para esta fonte
     // Only check by ticket_id if source is a ticket (daily_record_id is not a valid ticket FK)
     if (ticket_id) {
       const { data: existing } = await supabase
@@ -71,6 +71,20 @@ serve(async (req) => {
 
       if (existing) {
         return new Response(JSON.stringify({ message: 'Artigo já existe', article_id: existing.id }), {
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
+      }
+
+      const { data: existingProposal } = await supabase
+        .from('agent_proposals')
+        .select('id')
+        .eq('tipo_proposta', 'atualizacao_conhecimento')
+        .contains('source_refs', { ticket_id })
+        .in('status', ['pendente', 'aplicada'])
+        .maybeSingle();
+
+      if (existingProposal) {
+        return new Response(JSON.stringify({ message: 'Proposta já existe', proposal_id: existingProposal.id }), {
           headers: { ...corsHeaders, "Content-Type": "application/json" },
         });
       }
@@ -139,25 +153,39 @@ Ativo: ${ativoInfo}`
       };
     }
 
-    // Salvar artigo - only set ticket_id when source is actually a ticket
-    const { data: newArticle, error: insertError } = await supabase
-      .from('knowledge_articles')
+    // Não publica mais direto — vira uma proposta pendente de aprovação da
+    // diretoria (José). "Aplicar" (na tela de propostas) que de fato insere
+    // em knowledge_articles, usando dados_estruturados abaixo.
+    const conteudoProposto = `**${article.titulo}**\n\nProblema: ${article.problema}\n\nSolução:\n${article.solucao}\n\nCategoria: ${article.categoria || 'Outros'} | Tags: ${(article.tags || []).join(', ')}`;
+
+    const { data: newProposal, error: insertError } = await supabase
+      .from('agent_proposals')
       .insert({
-        ticket_id: ticket_id || null,
-        titulo: article.titulo,
-        problema: article.problema,
-        solucao: article.solucao,
-        tags: article.tags || [],
-        categoria: article.categoria || 'Outros',
+        departamento: 'operacional',
+        tipo_proposta: 'atualizacao_conhecimento',
+        titulo: `Novo artigo de base de conhecimento: ${article.titulo}`,
+        justificativa: `Gerado a partir de ${ticket_id ? 'chamado' : 'atendimento'} resolvido (${empresaNome}${ativoInfo !== 'N/A' ? `, ${ativoInfo}` : ''}).`,
+        conteudo_proposto: conteudoProposto,
+        dados_estruturados: {
+          destino: 'knowledge_articles',
+          ticket_id: ticket_id || null,
+          titulo: article.titulo,
+          problema: article.problema,
+          solucao: article.solucao,
+          tags: article.tags || [],
+          categoria: article.categoria || 'Outros',
+        },
+        source_refs: { ticket_id: ticket_id || null, daily_record_id: daily_record_id || null },
+        created_by_agent: 'ai-knowledge-generator',
       })
       .select()
       .single();
 
     if (insertError) throw insertError;
 
-    console.log('[ai-knowledge-generator] Article created:', newArticle.id);
+    console.log('[ai-knowledge-generator] Proposal created:', newProposal.id);
 
-    return new Response(JSON.stringify({ article: newArticle }), {
+    return new Response(JSON.stringify({ proposal: newProposal }), {
       headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
 

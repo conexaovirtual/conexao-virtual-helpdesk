@@ -13,13 +13,14 @@ import { Textarea } from "@/components/ui/textarea";
 import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
 import { Progress } from "@/components/ui/progress";
-import { Plus, FileSignature, Clock, AlertTriangle, CheckCircle, Loader2, Building2, Pencil, Trash2, FileDown, Search } from "lucide-react";
+import { Plus, FileSignature, Clock, AlertTriangle, CheckCircle, Loader2, Building2, Pencil, Trash2, FileDown, Search, Send } from "lucide-react";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { toast } from "@/hooks/use-toast";
 import { format, differenceInDays, isPast } from "date-fns";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useCNPJLookup } from "@/hooks/useCNPJLookup";
 import { downloadContratoPDF } from "@/lib/contratoPDF";
+import { downloadPropostaComercialPDF } from "@/lib/propostaComercialPDF";
 
 const contractTypes = [
   { value: "bloco_horas", label: "Bloco de Horas" },
@@ -47,6 +48,7 @@ const Contracts = () => {
   const [filterStatus, setFilterStatus] = useState("all");
   const [form, setForm] = useState(defaultForm);
   const [generatingId, setGeneratingId] = useState<string | null>(null);
+  const [generatingPropostaId, setGeneratingPropostaId] = useState<string | null>(null);
 
   // Fluxo "cadastrar nova empresa via CNPJ" dentro do diálogo de contrato
   const [newCompanyMode, setNewCompanyMode] = useState(false);
@@ -146,6 +148,26 @@ const Contracts = () => {
       toast({ title: "Erro ao gerar contrato", description: e?.message, variant: "destructive" });
     } finally {
       setGeneratingId(null);
+    }
+  };
+
+  // Gera o PDF da proposta comercial (mesmo dado do contrato — útil pra
+  // negociação em status 'pendente', ou pra mandar de novo mesmo já ativo).
+  const handleGerarProposta = async (contract: any) => {
+    setGeneratingPropostaId(contract.id);
+    try {
+      const { data: company, error } = await supabase
+        .from("companies")
+        .select("*")
+        .eq("id", contract.company_id)
+        .single();
+      if (error) throw error;
+      await downloadPropostaComercialPDF(contract, company);
+      toast({ title: "Proposta gerada!", description: "O download foi iniciado." });
+    } catch (e: any) {
+      toast({ title: "Erro ao gerar proposta", description: e?.message, variant: "destructive" });
+    } finally {
+      setGeneratingPropostaId(null);
     }
   };
 
@@ -539,6 +561,10 @@ const Contracts = () => {
                             <Button variant="ghost" size="icon" className="h-8 w-8 text-primary" title="Gerar contrato (PDF)"
                               onClick={() => handleGerarPDF(contract)} disabled={generatingId === contract.id}>
                               {generatingId === contract.id ? <Loader2 className="h-4 w-4 animate-spin" /> : <FileDown className="h-4 w-4" />}
+                            </Button>
+                            <Button variant="ghost" size="icon" className="h-8 w-8 text-primary" title="Gerar proposta comercial (PDF)"
+                              onClick={() => handleGerarProposta(contract)} disabled={generatingPropostaId === contract.id}>
+                              {generatingPropostaId === contract.id ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
                             </Button>
                             <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => openEdit(contract)}>
                               <Pencil className="h-4 w-4" />

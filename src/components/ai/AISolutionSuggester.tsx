@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
-import { Sparkles, Loader2, Check, Copy } from 'lucide-react';
+import { Sparkles, Loader2, Check, Copy, BookOpen } from 'lucide-react';
 import { supabase } from '@/integrations/supabase/client';
 import { useToast } from '@/hooks/use-toast';
 
@@ -14,12 +14,16 @@ interface AISolutionSuggesterProps {
 export function AISolutionSuggester({ ticketId, dailyRecordId, onApply }: AISolutionSuggesterProps) {
   const [loading, setLoading] = useState(false);
   const [suggestion, setSuggestion] = useState<string | null>(null);
+  // Páginas da wiki interna que embasaram a sugestão — mostrar de onde veio
+  // deixa o técnico conferir o procedimento completo em vez de confiar cego.
+  const [paginasWiki, setPaginasWiki] = useState<Array<{ titulo: string; url: string }>>([]);
   const [applied, setApplied] = useState(false);
   const { toast } = useToast();
 
   const handleSuggest = async () => {
     setLoading(true);
     setSuggestion(null);
+    setPaginasWiki([]);
     setApplied(false);
 
     try {
@@ -31,6 +35,12 @@ export function AISolutionSuggester({ ticketId, dailyRecordId, onApply }: AISolu
       if (data?.error) throw new Error(data.error);
 
       setSuggestion(data.suggestion);
+      // Deduplica por URL: a busca semântica pode trazer a mesma página em mais
+      // de um resultado, e repetir a fonte na lista só confunde.
+      const vistos = new Set<string>();
+      setPaginasWiki(
+        (data.wiki ?? []).filter((p: { url: string }) => !vistos.has(p.url) && vistos.add(p.url)),
+      );
     } catch (err: any) {
       toast({
         title: 'Erro ao gerar sugestão',
@@ -76,6 +86,26 @@ export function AISolutionSuggester({ ticketId, dailyRecordId, onApply }: AISolu
               Sugestão da IA
             </p>
             <p className="text-sm whitespace-pre-wrap">{suggestion}</p>
+
+            {paginasWiki.length > 0 && (
+              <div className="pt-1 border-t border-amber-200/60 dark:border-amber-800/60">
+                <p className="text-xs text-muted-foreground font-medium flex items-center gap-1 mt-2 mb-1">
+                  <BookOpen className="h-3 w-3" />
+                  Documentação da wiki usada
+                </p>
+                <ul className="space-y-0.5">
+                  {paginasWiki.map(p => (
+                    <li key={p.url}>
+                      <a href={p.url} target="_blank" rel="noopener noreferrer"
+                        className="text-xs text-primary hover:underline">
+                        {p.titulo}
+                      </a>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
             <div className="flex gap-2">
               <Button
                 type="button"

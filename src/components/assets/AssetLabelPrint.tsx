@@ -1,5 +1,6 @@
 import { useEffect, useState, useRef } from 'react';
 import QRCode from 'qrcode';
+import { buildAssetQrData } from '@/lib/assetQrCode';
 
 interface AssetLabelPrintProps {
   assets: Array<{
@@ -12,7 +13,6 @@ interface AssetLabelPrintProps {
   onClose: () => void;
 }
 
-const WHATSAPP_NUMBER = '5562984515801';
 const CANVAS_SIZE = 591; // 50mm at 300dpi
 
 export function AssetLabelPrint({ assets, onClose }: AssetLabelPrintProps) {
@@ -24,8 +24,7 @@ export function AssetLabelPrint({ assets, onClose }: AssetLabelPrintProps) {
     const generateQRCodes = async () => {
       const codes: Record<string, string> = {};
       for (const asset of assets) {
-        const message = `[ASSET:${asset.id}] Suporte: ${asset.nome}${asset.local ? ` - ${asset.local}` : ''}`;
-        const url = `https://wa.me/${WHATSAPP_NUMBER}?text=${encodeURIComponent(message)}`;
+        const url = buildAssetQrData(asset);
         codes[asset.id] = await QRCode.toDataURL(url, {
           width: 400,
           margin: 1,

@@ -45,6 +45,7 @@ import {
   Tags,
   Hammer,
   Receipt,
+  Sparkles,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { useQuery } from "@tanstack/react-query";
@@ -81,17 +82,26 @@ export function AppSidebar() {
   const isTech = profile.roles?.includes("tecnico");
   const isAdminOrTech = isAdmin || isTech;
   const isGestor = profile.roles?.includes("gestor_cliente");
+  // Conta de demonstração (José pediu 05/08/2026, pra mostrar o painel pra
+  // um cliente sem expor dado real) — só leitura, vinculada a uma empresa
+  // fictícia; RLS já bloqueia qualquer escrita independente do menu.
+  const isDemo = profile.roles?.includes("demo");
 
+  // Técnico de campo (role 'tecnico', sem admin_provedor) tem acesso
+  // restrito ao básico — José pediu (05/08/2026) ao contratar o Mike: só
+  // OS/atendimento/deslocamento/agenda próprios, nada de gestão de
+  // empresa, financeiro ou visão geral da operação. Itens abaixo que
+  // ANTES apareciam pra isAdminOrTech agora só aparecem pra isAdmin.
   const mainItems = [
     { title: "Dashboard", url: "/dashboard", icon: LayoutDashboard, show: true },
-    { title: "Painel Operacional", url: "/operational", icon: Activity, show: isAdminOrTech },
+    { title: "Painel Operacional", url: "/operational", icon: Activity, show: isAdmin },
     { title: "Agenda", url: "/agenda", icon: CalendarDays, show: true },
     { title: "Meu Dia", url: "/meu-dia", icon: CalendarCheck, show: isAdminOrTech },
-    { title: "Chamados", url: "/tickets", icon: Ticket, show: isAdminOrTech, badge: newTicketsCount },
-    { title: "Atendimentos", url: "/daily-services", icon: ClipboardList, show: isAdminOrTech },
-    { title: "Empresas", url: "/companies", icon: Building2, show: isAdminOrTech },
-    { title: "Rotas", url: "/route-planner", icon: Route, show: isAdminOrTech },
-    { title: "Mapa", url: "/company-map", icon: Map, show: isAdminOrTech },
+    { title: "Chamados", url: "/tickets", icon: Ticket, show: isAdminOrTech || isDemo, badge: newTicketsCount },
+    { title: "Atendimentos", url: "/daily-services", icon: ClipboardList, show: isAdminOrTech || isDemo },
+    { title: "Empresas", url: "/companies", icon: Building2, show: isAdmin },
+    { title: "Rotas", url: "/route-planner", icon: Route, show: isAdmin },
+    { title: "Mapa", url: "/company-map", icon: Map, show: isAdmin },
     { title: "Deslocamento", url: "/deslocamento", icon: Gauge, show: isAdminOrTech },
     { title: "Ordens de Serviço", url: "/reports?tab=service-orders", icon: FileText, show: true },
   ];
@@ -99,24 +109,25 @@ export function AppSidebar() {
   const resourceItems = [
     { title: "Ativos", url: "/assets", icon: Package, show: true },
     { title: "Inventário", url: "/inventory", icon: PackageSearch, show: true },
-    { title: "Produtos", url: "/produtos", icon: Tags, show: isAdminOrTech },
-    { title: "Serviços", url: "/servicos", icon: Hammer, show: isAdminOrTech },
-    { title: "Propostas", url: "/propostas", icon: Receipt, show: isAdminOrTech || isGestor },
+    { title: "Produtos", url: "/produtos", icon: Tags, show: isAdmin },
+    { title: "Serviços", url: "/servicos", icon: Hammer, show: isAdmin },
+    { title: "Propostas", url: "/propostas", icon: Receipt, show: isAdmin || isGestor },
     { title: "Base de Conhecimento", url: "/knowledge-base", icon: BookOpen, show: true },
     { title: "Chat Interno", url: "/chat", icon: MessageCircle, show: true },
     { title: "Projetos", url: "/projects", icon: FolderKanban, show: true },
     { title: "Centro de Custo", url: "/cost-center", icon: Wallet, show: isAdmin || isGestor },
     { title: "Contratos", url: "/contracts", icon: FileSignature, show: isAdmin || isGestor },
-    { title: "CMDB", url: "/cmdb", icon: Network, show: isAdminOrTech },
-    { title: "Monitor de Rede", url: "/network-monitor", icon: Wifi, show: isAdminOrTech },
+    { title: "CMDB", url: "/cmdb", icon: Network, show: isAdmin },
+    { title: "Monitor de Rede", url: "/network-monitor", icon: Wifi, show: isAdmin },
   ];
 
   const adminItems = [
-    { title: "Relatórios", url: "/reports", icon: FileBarChart, show: isAdminOrTech || isGestor },
+    { title: "Relatórios", url: "/reports", icon: FileBarChart, show: isAdmin || isGestor },
     { title: "Analytics", url: "/analytics", icon: BarChart3, show: isAdmin },
-    { title: "Satisfação", url: "/csat", icon: Smile, show: isAdminOrTech },
+    { title: "Satisfação", url: "/csat", icon: Smile, show: isAdmin },
+    { title: "Propostas dos Agentes", url: "/agent-proposals", icon: Sparkles, show: isAdmin },
     { title: "Técnicos", url: "/technicians", icon: Wrench, show: isAdmin },
-    { title: "WhatsApp", url: "/whatsapp-platform", icon: MessageSquare, show: isAdminOrTech },
+    { title: "WhatsApp", url: "/whatsapp-platform", icon: MessageSquare, show: isAdmin },
   ];
 
   const renderItems = (items: typeof mainItems) =>

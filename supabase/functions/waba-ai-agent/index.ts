@@ -1,6 +1,37 @@
 import { serve } from "https://deno.land/std@0.190.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { sendWabaText, sendWabaAudio } from "../_shared/waba-provider.ts";
+import { previewSchedule, pickTechnician } from "../_shared/service-order-scheduler.ts";
+
+const JOSE_TECNICO_ID = "e336e78e-c11a-48b5-8d69-2bb48cf6bb3b";
+
+// Cliente sem contrato ("eventual") só pode ter OS agendada depois de uma
+// confirmação explícita de valor+data (tool confirmar_visita_eventual),
+// válida por 2h — janela generosa o bastante pra negociar, curta o
+// bastante pra não deixar uma confirmação antiga "autorizando" uma visita
+// completamente diferente meses depois (waba_conversations é 1 linha por
+// telefone, permanente, não por conversa/sessão).
+const VISITA_EVENTUAL_JANELA_MS = 2 * 60 * 60 * 1000;
+
+async function getVisitaEventualConfirmacaoValida(supabase: any, conversationId: string): Promise<boolean> {
+  const { data: conv } = await supabase
+    .from("waba_conversations")
+    .select("visita_eventual_confirmada_em")
+    .eq("id", conversationId)
+    .maybeSingle();
+  if (!conv?.visita_eventual_confirmada_em) return false;
+  const confirmedAt = new Date(conv.visita_eventual_confirmada_em).getTime();
+  return Date.now() - confirmedAt <= VISITA_EVENTUAL_JANELA_MS;
+}
+
+// Token de uso único: some assim que a OS é criada com sucesso, pra não
+// dar pra reaproveitar a mesma confirmação numa segunda visita depois.
+async function clearVisitaEventualConfirmacao(supabase: any, conversationId: string) {
+  await supabase
+    .from("waba_conversations")
+    .update({ visita_eventual_valor: null, visita_eventual_data: null, visita_eventual_confirmada_em: null })
+    .eq("id", conversationId);
+}
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -43,20 +74,15 @@ serve(async (req: Request) => {
       });
     }
 
-    // Skip groups without a linked company
+    // A IA nunca atende grupo (José pediu 27/07/2026 — atendimento em grupo
+    // estava ficando confuso). waba-webhook já não deveria chamar esta
+    // function pra mensagem de grupo, mas o corte fica aqui também por
+    // segurança, caso algo mais invoque direto.
     if (is_group) {
-      const { data: contact } = await supabase
-        .from("whatsapp_contacts")
-        .select("company_id")
-        .eq("phone_number", phone_number)
-        .maybeSingle();
-
-      if (!contact?.company_id) {
-        console.log("Group without linked company, skipping:", phone_number);
-        return new Response(JSON.stringify({ skipped: true, reason: "unlinked_group" }), {
-          headers: { "Content-Type": "application/json", ...corsHeaders },
-        });
-      }
+      console.log("Group message, AI disabled for groups:", phone_number);
+      return new Response(JSON.stringify({ skipped: true, reason: "group_ai_disabled" }), {
+        headers: { "Content-Type": "application/json", ...corsHeaders },
+      });
     }
 
     // Transcribe audio if needed
@@ -156,6 +182,17 @@ serve(async (req: Request) => {
 
     // Gather enriched context
     const context = await gatherContext(supabase, phone_number, effectiveMessage);
+
+    // Departamento da conversa (Fase 0 da "empresa virtual") + conhecimento
+    // já aprovado pela diretoria (José) pra esse departamento — nunca inclui
+    // proposta ainda pendente, só o que já foi aprovado e aplicado.
+    context.departamento = conversation.departamento_atual || "triagem";
+    const { data: deptKnowledge } = await supabase
+      .from("department_knowledge_base")
+      .select("secao, conteudo")
+      .eq("departamento", context.departamento)
+      .order("secao");
+    context.departmentKnowledge = deptKnowledge || [];
 
     const systemPrompt = buildSystemPrompt(context);
 
@@ -646,11 +683,57 @@ async function gatherContext(supabase: any, phone: string, message: string) {
   return { articles: allArticles, contact, openTickets, visits, assets, recentServices, companyId, assetFromTag, assetTicketHistory, todayAgenda, pendingOrcamento, multipleCompanies };
 }
 
+// ─── Proteção de credenciais ─────────────────────────────────────────
+// A Miya conversa com CLIENTE no WhatsApp, e a base de conhecimento é escrita
+// por IA a partir de atendimentos — já apareceu artigo com usuário e senha de
+// máquina de cliente em texto puro (caso BlueColor, 12/08/2026). Como não dá
+// para confiar que isso não se repita, mascaramos na saída, nos DOIS caminhos
+// por onde artigo chega nela: o prompt do sistema e a ferramenta de busca.
+//
+// Prefere errar mascarando demais: técnico vê o texto completo no helpdesk.
+const AVISO_CREDENCIAL = "(credencial não exibida — consultar no NexoRMM)";
+const CHAVE_CREDENCIAL =
+  "senhas?|passwords?|pass|credenciais?|credencial|usu[áa]rios?|logins?|users?";
+
+// Só trata como credencial o que TEM CARA de valor (dígito, símbolo, CamelCase
+// ou ponto no meio). Sem isso, "trocar a senha depois" viraria máscara e a
+// resposta da Miya ficaria sem sentido.
+function pareceCredencial(v: string): boolean {
+  return /\d/.test(v) || /[@#$%!_\-*]/.test(v) || /[a-z][A-Z]/.test(v) || /\w\.\w/.test(v);
+}
+
+export function mascararCredenciais(texto: string): string {
+  if (!texto) return texto;
+  let saida = texto;
+
+  // A) Valor ENTRE ASPAS até ~40 caracteres depois da palavra-chave. Pega
+  //    "usuário ... com o nome 'BlueColor_TX8'", em que o valor fica longe.
+  saida = saida.replace(
+    new RegExp(`\\b(${CHAVE_CREDENCIAL})\\b([^'"«]{0,40}?)(['"«])([^'"»]{2,})(['"»])`, "gi"),
+    (_m, chave, meio) => `${chave}${meio}${AVISO_CREDENCIAL}`,
+  );
+
+  // B) Valor SOLTO logo depois da palavra-chave ("senha: Xyz@2026").
+  saida = saida.replace(
+    new RegExp(`\\b(${CHAVE_CREDENCIAL})\\b(\\s*(?:é|eh|is|:|=|como|sendo)?\\s*)([A-Za-z0-9@#$%!._\\-]{4,})`, "gi"),
+    (m, chave, meio, bruto) => {
+      // Pontuação final não faz parte do valor: sem separar, o ponto de
+      // "senha depois." conta como símbolo e vira falso positivo.
+      const fim = bruto.match(/[.,;:!?]+$/)?.[0] ?? "";
+      const valor = fim ? bruto.slice(0, -fim.length) : bruto;
+      if (valor.length < 4 || !pareceCredencial(valor)) return m;
+      return `${chave}${meio}${AVISO_CREDENCIAL}${fim}`;
+    },
+  );
+
+  return saida;
+}
+
 // ─── System Prompt (Enhanced) ────────────────────────────────────────
 
 function buildSystemPrompt(context: any) {
   const articlesText = (context.articles || [])
-    .map((a: any) => `• **${a.titulo}**: ${a.problema} → ${a.solucao}`)
+    .map((a: any) => mascararCredenciais(`• **${a.titulo}**: ${a.problema} → ${a.solucao}`))
     .join("\n");
 
   const ticketsText = (context.openTickets || [])
@@ -793,6 +876,8 @@ Você TEM acesso a chamados, ativos, agenda e histórico do cliente abaixo. Esse
 NUNCA execute uma ferramenta sem o cliente ter pedido explicitamente o que ela resolve.
 - create_ticket: só após o cliente CONFIRMAR "pode abrir o chamado" (ou equivalente).
 - create_schedule: só após o cliente pedir agendamento e confirmar data/hora.
+- consultar_valor_visita: use para saber o valor certo da visita técnica — NUNCA informe preço de memória, sempre consulte aqui antes de falar valor pro cliente.
+- confirmar_visita_eventual: OBRIGATÓRIO para cliente SEM contrato (eventual) antes de agendar. Só chame depois que o cliente confirmar EXPLICITAMENTE valor E data da visita — nunca supondo que ele concordou. Sem essa confirmação, create_ticket não agenda OS e create_schedule recusa direto.
 - find_company / link_contact: só quando o cliente disser o nome da empresa ou pedir para ser identificado. NÃO infira.
 - register_asset: só quando o cliente pedir para cadastrar um ativo.
 - close_ticket: só quando o cliente pedir para encerrar.
@@ -828,6 +913,19 @@ Reveja sua resposta antes de enviar:
 EMPRESA: ${companyName}
 CONTATO: ${contactName}
 TIPO DE CONTRATO: ${contractType}
+${contractType === "eventual" ? `
+🔒 CLIENTE SEM CONTRATO — GATE DE VISITA OBRIGATÓRIO:
+Antes de agendar (create_ticket com visita ou create_schedule), você PRECISA:
+1. Chamar consultar_valor_visita e informar o valor da visita (inclui 2h de atendimento) pro cliente.
+2. Esperar o cliente confirmar EXPLICITAMENTE que concorda com o valor E com a data proposta.
+3. Só então chamar confirmar_visita_eventual com o valor e a data confirmados.
+Sem isso, o agendamento é recusado automaticamente. Serviço extra descoberto na visita é orçamento à parte (solicitar_orcamento) — nunca incluído na visita padrão.` : ""}
+${contractType === "contrato_manutencao" ? `
+💰 CLIENTE COM CONTRATO — FINANCEIRO:
+- Pergunta sobre vencimento, valor mensal ou horas restantes do contrato → chame consultar_contrato, NUNCA informe de memória.
+- "Como eu pago?" → junte numa resposta só o dia de vencimento (via consultar_contrato) e a chave PIX/CNPJ (ver seção de dado sensível abaixo).
+- Emissão de nota fiscal e status de pagamento são geridos pelo BomControle, fora daqui — se perguntarem se já está pago, diga que não tem essa informação e ofereça encaminhar pro José.
+- Pedido de desconto, renegociação de valor/plano, ou cancelamento de contrato → SEMPRE escalate_to_department('financeiro', motivo). Nunca prometa, negocie ou decida nada financeiro sozinha.` : ""}
 ${companyId ? `COMPANY_ID: ${companyId}` : multipleCompanies.length > 1 ? `MÚLTIPLAS EMPRESAS ENCONTRADAS PARA ESTE CONTATO:
 ${multipleCompanies.map((c, i) => `${i + 1}. ${c.nome_fantasia} (ID: ${c.id})`).join("\n")}
 
@@ -953,9 +1051,24 @@ Se a mensagem do cliente é claramente dirigida ao José/Pereira pessoalmente �
 ═══════════════════════════════════════
 📅 AGENDAMENTOS:
 ═══════════════════════════════════════
-- create_schedule notifica o Jose automaticamente. Você só confirma.
-- NUNCA prometa horário sem chamar create_schedule (ele valida o slot).
-- Mudança/cancelamento de agendamento existente → partial_escalate.`;
+- create_ticket/create_schedule NÃO criam mais uma visita definitiva sozinhos — só registram um horário candidato e notificam o José, que confirma manualmente.
+- NUNCA diga "confirmado"/"agendado" pro cliente depois de chamar essas ferramentas — diga que o horário é candidato e a equipe vai confirmar em breve (ex.: "Consigo um horário provável segunda de manhã, vou confirmar com a equipe e já te aviso!").
+- Mudança/cancelamento de agendamento existente → partial_escalate.
+
+═══════════════════════════════════════
+🏢 DEPARTAMENTO ATUAL: ${(context.departamento || "triagem").toUpperCase()}
+═══════════════════════════════════════
+${
+  (context.departmentKnowledge || []).length > 0
+    ? `Conhecimento aprovado para este departamento:\n${(context.departmentKnowledge || [])
+        .map((k: any) => `• [${k.secao}] ${k.conteudo}`)
+        .join("\n")}`
+    : "Nenhum conhecimento específico aprovado para este departamento ainda."
+}
+
+- Se a conversa claramente pertence a outro departamento (ex.: assunto de contrato/cobrança → financeiro; publicidade/novidade → comercial; satisfação/reclamação recorrente → qualidade; suporte técnico/chamado/agenda → operacional), chame escalate_to_department(departamento, motivo) UMA vez. Isso muda o departamento da conversa e avisa o José — não fica repetindo a cada mensagem.
+- Se perceber um padrão que deveria virar regra oficial da empresa (ex.: preço, política, algo que José sempre faz de um jeito específico) e ainda não está no conhecimento aprovado acima, chame propose_new_rule — NUNCA trate como regra só porque você "percebeu" o padrão. Só vira regra depois que o José aprovar na tela dele.
+- Se identificar uma oportunidade comercial genuína NESTA conversa (cliente perguntou sobre outro serviço, ensejo natural de contar uma novidade relevante), chame propose_commercial_message — isso só registra a sugestão pro José revisar e decidir se manda; NUNCA prometa ao cliente que vai mandar algo, e NUNCA use isso pra iniciar assunto comercial fora de uma conversa que o próprio cliente começou.`;
 }
 
 // ─── Tools Definition (Expanded) ─────────────────────────────────────
@@ -1001,7 +1114,7 @@ function getTools() {
       type: "function",
       function: {
         name: "search_knowledge_base",
-        description: "Busca artigos na base de conhecimento por palavra-chave. Use proativamente antes de responder dúvidas técnicas.",
+        description: "Busca na base de conhecimento e nos tutoriais da wiki liberados para cliente. Use proativamente antes de responder dúvidas técnicas. O campo 'wiki' do resultado traz tutoriais já revisados pela equipe — prefira o conteúdo deles quando bater com a dúvida.",
         parameters: {
           type: "object",
           properties: {
@@ -1199,7 +1312,7 @@ function getTools() {
       type: "function",
       function: {
         name: "create_schedule",
-        description: "Cria um novo agendamento (ordem de serviço) usando o Smart Scheduler. Útil para agendar atendimentos e compromissos.",
+        description: "Registra um PEDIDO de agendamento com um horário candidato (usando o Smart Scheduler) e notifica o José. NÃO cria uma visita definitiva — a confirmação final é manual. Nunca diga ao cliente que está confirmado.",
         parameters: {
           type: "object",
           properties: {
@@ -1246,6 +1359,89 @@ function getTools() {
         },
       },
     },
+    {
+      type: "function",
+      function: {
+        name: "escalate_to_department",
+        description: "Encaminha a conversa pra outro departamento da empresa (financeiro, operacional, comercial ou qualidade) quando o assunto claramente pertence a ele. Use no máximo 1x por assunto — não repita a cada mensagem.",
+        parameters: {
+          type: "object",
+          properties: {
+            departamento: { type: "string", enum: ["financeiro", "operacional", "comercial", "qualidade"], description: "Departamento de destino" },
+            motivo: { type: "string", description: "Por que essa conversa pertence a esse departamento" },
+          },
+          required: ["departamento", "motivo"],
+          additionalProperties: false,
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "propose_new_rule",
+        description: "Sugere uma regra, preço ou atualização de conhecimento nova pra diretoria (José) revisar. NUNCA vira regra oficial sozinho — só registra a sugestão. Use quando perceber um padrão recorrente que ainda não está documentado.",
+        parameters: {
+          type: "object",
+          properties: {
+            departamento: { type: "string", enum: ["financeiro", "operacional", "comercial", "qualidade"], description: "Departamento a que a regra pertence" },
+            titulo: { type: "string", description: "Título curto da sugestão" },
+            justificativa: { type: "string", description: "Por que está sugerindo isso (o que foi observado)" },
+            conteudo_proposto: { type: "string", description: "O texto da regra/conhecimento sugerido, pronto pra virar documentação se aprovado" },
+          },
+          required: ["departamento", "titulo", "justificativa", "conteudo_proposto"],
+          additionalProperties: false,
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "propose_commercial_message",
+        description: "Sugere uma mensagem comercial (novidade, cross-sell, oferta) pra ESTE cliente específico, quando surgir uma oportunidade genuína na conversa. NUNCA envia nada — só registra a sugestão pro José revisar destinatário e texto e decidir se manda. Use no máximo 1x por assunto.",
+        parameters: {
+          type: "object",
+          properties: {
+            conteudo_proposto: { type: "string", description: "Texto da mensagem comercial sugerida" },
+            motivo: { type: "string", description: "Por que essa mensagem faz sentido pra este cliente agora" },
+          },
+          required: ["conteudo_proposto", "motivo"],
+          additionalProperties: false,
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "consultar_valor_visita",
+        description: "Consulta o valor atual da visita técnica e quantas horas de atendimento ela inclui. Use SEMPRE antes de informar o preço da visita a um cliente sem contrato — NUNCA informe de memória, o valor pode mudar.",
+        parameters: { type: "object", properties: {}, additionalProperties: false },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "confirmar_visita_eventual",
+        description: "Registra a confirmação EXPLÍCITA do cliente sobre valor e data da visita técnica (cliente sem contrato). SÓ chame depois que o cliente confirmar claramente as duas coisas — nunca antes, nunca supondo. É obrigatório antes de create_schedule funcionar para cliente eventual.",
+        parameters: {
+          type: "object",
+          properties: {
+            valor: { type: "number", description: "Valor da visita que o cliente confirmou (deve bater com o valor de consultar_valor_visita)" },
+            data_visita: { type: "string", description: "Data confirmada no formato YYYY-MM-DD" },
+            resumo_acordado: { type: "string", description: "Resumo curto do que foi combinado" },
+          },
+          required: ["valor", "data_visita", "resumo_acordado"],
+          additionalProperties: false,
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "consultar_contrato",
+        description: "Consulta o contrato ATIVO da empresa do cliente (status, horas contratadas/consumidas/restantes, vencimento, valor mensal). Use SEMPRE que o cliente perguntar sobre vencimento, valor ou horas do contrato — NUNCA informe de memória. Se o cliente não tiver contrato ativo, a ferramenta avisa e você explica isso normalmente.",
+        parameters: { type: "object", properties: {}, additionalProperties: false },
+      },
+    },
   ];
 }
 
@@ -1261,8 +1457,7 @@ async function handleToolCalls(supabase: any, toolCalls: any[], phone: string, c
     switch (call.function.name) {
       case "create_ticket": {
         const contactName = context.contact?.contact_name || phone;
-        const TECNICO_ID = "e336e78e-c11a-48b5-8d69-2bb48cf6bb3b";
-        const TECNICO_PHONE = "5562999522470";
+        const TECNICO_PHONE = "5562999522470"; // José — notificação de admin, sempre recebe
 
         // ─── Trava anti-duplicidade ──────────────────────────────────
         // Execuções paralelas (cliente fragmentando mensagens) e rounds
@@ -1273,7 +1468,7 @@ async function handleToolCalls(supabase: any, toolCalls: any[], phone: string, c
         const dupSince = new Date(Date.now() - 30 * 60 * 1000).toISOString();
         const { data: recentTicket } = await supabase
           .from("tickets")
-          .select("id, numero, titulo")
+          .select("id, numero, titulo, tecnico_id")
           .eq("canal", "whatsapp")
           .eq("solicitante_contato", phone)
           .gte("created_at", dupSince)
@@ -1285,7 +1480,7 @@ async function handleToolCalls(supabase: any, toolCalls: any[], phone: string, c
         if (recentTicket) {
           await supabase.from("ticket_comments").insert({
             ticket_id: recentTicket.id,
-            user_id: TECNICO_ID,
+            user_id: recentTicket.tecnico_id,
             comentario: `[Via WhatsApp IA] Pedido adicional do cliente na mesma conversa: ${args.titulo} — ${args.descricao}`,
             is_internal: true,
           });
@@ -1298,6 +1493,10 @@ async function handleToolCalls(supabase: any, toolCalls: any[], phone: string, c
           console.log(`create_ticket dedupe: reused #${recentTicket.numero} for ${phone}`);
           break;
         }
+
+        // Fase 1 — técnico único (José) deixou de ser hardcoded: escolhe
+        // dinamicamente entre todos os técnicos ativos por menor carga.
+        const tecnico = await pickTechnician(supabase);
 
         const { data: ticket, error } = await supabase
           .from("tickets")
@@ -1312,7 +1511,7 @@ async function handleToolCalls(supabase: any, toolCalls: any[], phone: string, c
             asset_id: args.asset_id || null,
             solicitante_nome: contactName,
             solicitante_contato: phone,
-            tecnico_id: TECNICO_ID,
+            tecnico_id: tecnico.id,
             public_request: true,
           })
           .select("numero, id")
@@ -1323,79 +1522,66 @@ async function handleToolCalls(supabase: any, toolCalls: any[], phone: string, c
           result = { success: false, error: error.message };
         } else {
           result = { success: true, numero: ticket.numero, id: ticket.id };
-          console.log(`Ticket #${ticket.numero} created and assigned to Jose Pereira`);
+          console.log(`Ticket #${ticket.numero} created and assigned to ${tecnico.nome}`);
 
-          // ─── Smart Scheduler: auto-create OS with slot ───────
+          // ─── TRAVA (28/07/2026): a Miya NÃO cria mais OS sozinha, nem
+          // pra cliente eventual nem pra cliente com contrato — José pediu
+          // depois de um caso real onde a empresa/endereço ficou ambíguo e
+          // ela agendou mesmo assim. Agora ela só PROPÕE (agent_proposals,
+          // tipo agendamento_visita) e a OS de verdade só nasce quando o
+          // José aprova + aplica na tela de Propostas dos Agentes.
+          const tipoContrato = context.assetFromTag?.companies?.tipo_contrato || context.contact?.companies?.tipo_contrato || null;
           let osInfo = "";
+
+          if (tipoContrato === "eventual") {
+            const confirmacaoValida = await getVisitaEventualConfirmacaoValida(supabase, conversationId);
+            if (!confirmacaoValida) {
+              result.aviso_agendamento = "Cliente sem contrato: ainda não há confirmação válida de valor e data da visita. Chame consultar_valor_visita e, depois que o cliente confirmar, confirmar_visita_eventual antes de seguir.";
+            }
+          }
           try {
-            const schedulerResponse = await fetch(
-              `${Deno.env.get("SUPABASE_URL")}/functions/v1/smart-scheduler`,
-              {
-                method: "POST",
-                headers: {
-                  "Content-Type": "application/json",
-                  Authorization: `Bearer ${Deno.env.get("SUPABASE_ANON_KEY")}`,
+            const preview = await previewSchedule(supabase, {
+              company_id: args.company_id,
+              titulo: args.titulo,
+              descricao: args.descricao,
+              urgencia: args.urgencia,
+              data_desejada: undefined,
+              tecnico_preescolhido: tecnico,
+            });
+            if (preview.success) {
+              const companyNameProp = context.contact?.companies?.nome_fantasia || "empresa não identificada";
+              await supabase.from("agent_proposals").insert({
+                departamento: "operacional",
+                tipo_proposta: "agendamento_visita",
+                titulo: `Agendamento — ${companyNameProp}`,
+                justificativa: `Cliente pediu via chamado #${ticket.numero}: ${args.titulo}`,
+                conteudo_proposto: args.descricao,
+                destinatario_phone: phone,
+                destinatario_company_id: args.company_id || null,
+                dados_estruturados: {
+                  ticket_id: ticket.id,
+                  urgencia: args.urgencia,
+                  data_desejada: preview.data,
+                  hora_inicio: preview.hora_inicio,
+                  hora_fim: preview.hora_fim,
+                  modalidade: preview.modalidade,
+                  tecnico_id: preview.tecnico?.id,
+                  tecnico_nome: preview.tecnico?.nome,
                 },
-                body: JSON.stringify({
-                  tecnico_id: TECNICO_ID,
-                  description: `${args.titulo} ${args.descricao}`,
-                  prioridade: args.urgencia === "alta" ? "alta" : "media",
-                }),
-              }
-            );
-
-            if (schedulerResponse.ok) {
-              const slot = await schedulerResponse.json();
-              if (slot.success) {
-                const { data: lastOs } = await supabase
-                  .from("service_orders")
-                  .select("numero_os")
-                  .order("numero_os", { ascending: false })
-                  .limit(1);
-                const nextNumber = (lastOs?.[0]?.numero_os || 0) + 1;
-
-                const { data: company } = await supabase
-                  .from("companies")
-                  .select("endereco, telefone")
-                  .eq("id", args.company_id)
-                  .single();
-
-                const { data: os, error: osErr } = await supabase
-                  .from("service_orders")
-                  .insert({
-                    company_id: args.company_id,
-                    ticket_id: ticket.id,
-                    asset_id: args.asset_id || null,
-                    tecnico_id: TECNICO_ID,
-                    tipo_servico: slot.modalidade === "remoto" ? "remoto" : "corretivo",
-                    prioridade: args.urgencia === "alta" ? "alta" : "media",
-                    modalidade: slot.modalidade,
-                    descricao_servicos: `${args.titulo}\n\n${args.descricao}`,
-                    data_agendada: `${slot.data}T${slot.hora_inicio}:00`,
-                    hora_agendada: slot.hora_inicio,
-                    status: "agendada",
-                    numero_os: nextNumber,
-                    endereco_atendimento: slot.modalidade === "presencial" ? (company?.endereco || null) : null,
-                    telefone_contato: company?.telefone || null,
-                    observacoes: `OS criada automaticamente via WhatsApp.\nModalidade: ${slot.modalidade}`,
-                  })
-                  .select("id, numero_os")
-                  .single();
-
-                if (!osErr && os) {
-                  const modalLabel = slot.modalidade === "remoto" ? "remoto" : "presencial";
-                  osInfo = `\n📅 OS #${os.numero_os} agendada (${modalLabel}): ${slot.data} às ${slot.hora_inicio}`;
-                  result.os_numero = os.numero_os;
-                  result.agendamento = `${slot.data} ${slot.hora_inicio}-${slot.hora_fim} (${modalLabel})`;
-                  console.log(`OS #${os.numero_os} created (${slot.modalidade}) for ticket #${ticket.numero}`);
-                }
-              }
+                created_by_agent: "waba-ai-agent",
+              });
+              osInfo = `\n📅 Horário candidato (AGUARDANDO SUA APROVAÇÃO em /agent-proposals): ${preview.data} ${preview.hora_inicio}-${preview.hora_fim} (${preview.modalidade}), técnico sugerido ${preview.tecnico?.nome}`;
+              result.horario_candidato = `${preview.data} ${preview.hora_inicio}-${preview.hora_fim} (${preview.modalidade})`;
+              result.aviso_agendamento = (result.aviso_agendamento ? result.aviso_agendamento + " " : "") +
+                "Pedido de agendamento registrado — informe ao cliente que o horário ainda depende de confirmação da equipe, não prometa como definitivo.";
             }
           } catch (schedErr) {
-            console.error("Smart scheduler error (non-fatal):", schedErr);
+            console.error("previewSchedule/proposal error (non-fatal):", schedErr);
           }
 
-          // Notify technician via WhatsApp
+          // Notify technician via WhatsApp — José sempre recebe (dono do
+          // negócio); se o técnico atribuído for outra pessoa, notifica
+          // ele também, senão o novo técnico nunca fica sabendo da OS.
           try {
             const companyName = context.contact?.companies?.nome_fantasia || "Empresa não identificada";
             const notifMsg = `🔔 *Novo Chamado #${ticket.numero}*\n\n` +
@@ -1404,12 +1590,20 @@ async function handleToolCalls(supabase: any, toolCalls: any[], phone: string, c
               `👤 *Solicitante:* ${contactName}\n` +
               `📞 *Contato:* ${phone}\n` +
               `⚡ *Urgência:* ${args.urgencia || "media"}\n` +
-              `💥 *Impacto:* ${args.impacto || "medio"}\n\n` +
+              `💥 *Impacto:* ${args.impacto || "medio"}\n` +
+              `🔧 *Técnico atribuído:* ${tecnico.nome}\n\n` +
               `📝 *Descrição:*\n${args.descricao}${osInfo}\n\n` +
               `${args.asset_id ? `🖥️ *Ativo vinculado:* Sim` : `🖥️ *Ativo:* Não vinculado`}`;
 
             await sendWabaText(TECNICO_PHONE, notifMsg, { openTicket: false });
             console.log(`WhatsApp notification sent to technician ${TECNICO_PHONE}`);
+
+            if (tecnico.id !== JOSE_TECNICO_ID) {
+              const { data: tecProfile } = await supabase.from("profiles").select("telefone").eq("id", tecnico.id).maybeSingle();
+              if (tecProfile?.telefone) {
+                await sendWabaText(tecProfile.telefone, notifMsg, { openTicket: false });
+              }
+            }
           } catch (notifErr) {
             console.error("Failed to notify technician:", notifErr);
           }
@@ -1442,6 +1636,7 @@ async function handleToolCalls(supabase: any, toolCalls: any[], phone: string, c
 
       case "search_knowledge_base": {
         let articles: any[] = [];
+        let paginasWiki: any[] = [];
 
         // 1) Busca semântica (embedding da pergunta → similaridade por cosseno)
         try {
@@ -1461,6 +1656,18 @@ async function handleToolCalls(supabase: any, toolCalls: any[], phone: string, c
                 match_threshold: 0.2,
               });
               if (!matchErr && matches?.length) articles = matches;
+
+              // Wiki interna (BookStack). ⚠️ p_somente_cliente: true é
+              // OBRIGATÓRIO aqui — a Miya conversa com CLIENTE no WhatsApp, e a
+              // wiki é documentação interna. Só passa página que o José marcou
+              // com a tag "cliente" no BookStack. Não remover essa trava.
+              const { data: wiki, error: wikiErr } = await supabase.rpc("match_wiki_pages", {
+                query_embedding: queryEmbedding,
+                match_count: 3,
+                match_threshold: 0.3,
+                p_somente_cliente: true,
+              });
+              if (!wikiErr && wiki?.length) paginasWiki = wiki;
             }
           }
         } catch (e: any) {
@@ -1486,12 +1693,20 @@ async function handleToolCalls(supabase: any, toolCalls: any[], phone: string, c
 
         result = {
           found: articles.length,
+          // mascararCredenciais: ver comentário na definição — artigo gerado por
+          // IA já trouxe senha de cliente em texto puro.
           articles: articles.map((a: any) => ({
             titulo: a.titulo,
-            problema: a.problema,
-            solucao: a.solucao,
+            problema: mascararCredenciais(a.problema),
+            solucao: mascararCredenciais(a.solucao),
             categoria: a.categoria,
             ...(a.similarity != null ? { relevancia: Math.round(a.similarity * 100) / 100 } : {}),
+          })),
+          // Páginas da wiki liberadas para cliente (tag "cliente" no BookStack).
+          wiki: paginasWiki.map((p: any) => ({
+            titulo: p.titulo,
+            conteudo: mascararCredenciais(String(p.conteudo ?? "").slice(0, 1500)),
+            relevancia: Math.round((p.similarity ?? 0) * 100) / 100,
           })),
         };
         break;
@@ -1947,97 +2162,99 @@ async function handleToolCalls(supabase: any, toolCalls: any[], phone: string, c
       }
 
       case "create_schedule": {
-        const TECNICO_ID_SCHED = "e336e78e-c11a-48b5-8d69-2bb48cf6bb3b";
         try {
-          // Use Smart Scheduler to find best slot
-          const schedulerResponse = await fetch(
-            `${Deno.env.get("SUPABASE_URL")}/functions/v1/smart-scheduler`,
-            {
-              method: "POST",
-              headers: {
-                "Content-Type": "application/json",
-                Authorization: `Bearer ${Deno.env.get("SUPABASE_ANON_KEY")}`,
-              },
-              body: JSON.stringify({
-                tecnico_id: TECNICO_ID_SCHED,
-                description: `${args.titulo} ${args.descricao}`,
-                prioridade: "media",
-                preferred_date: args.data,
-              }),
-            }
-          );
-
-          if (!schedulerResponse.ok) {
-            result = { success: false, error: "Smart Scheduler indisponível" };
-            break;
-          }
-
-          const slot = await schedulerResponse.json();
-          if (!slot.success) {
-            result = { success: false, error: "Nenhum slot disponível para esta data" };
-            break;
-          }
-
-          const { data: lastOs } = await supabase
-            .from("service_orders")
-            .select("numero_os")
-            .order("numero_os", { ascending: false })
-            .limit(1);
-          const nextNumber = (lastOs?.[0]?.numero_os || 0) + 1;
-
           const companyId = args.company_id || context.companyId || null;
+          const tipoContrato = context.assetFromTag?.companies?.tipo_contrato || context.contact?.companies?.tipo_contrato || null;
 
-          const { data: os, error: osErr } = await supabase
-            .from("service_orders")
-            .insert({
-              company_id: companyId || "00000000-0000-0000-0000-000000000001",
-              tecnico_id: TECNICO_ID_SCHED,
-              tipo_servico: args.tipo_servico || "corretivo",
-              prioridade: "media",
-              modalidade: slot.modalidade,
-              descricao_servicos: `${args.titulo}\n\n${args.descricao}`,
-              data_agendada: `${slot.data}T${slot.hora_inicio}:00`,
-              hora_agendada: slot.hora_inicio,
-              status: "agendada",
-              numero_os: nextNumber,
-              observacoes: "Agendado via WhatsApp IA",
-            })
-            .select("id, numero_os")
-            .single();
-
-          if (osErr) {
-            result = { success: false, error: osErr.message };
-          } else {
-            result = {
-              success: true,
-              numero_os: os.numero_os,
-              data: slot.data,
-              hora: `${slot.hora_inicio}-${slot.hora_fim}`,
-              modalidade: slot.modalidade,
-            };
-            console.log(`Schedule created: OS #${os.numero_os} on ${slot.data} at ${slot.hora_inicio}`);
-
-            // === NOTIFICAR TÉCNICO via WhatsApp sobre novo agendamento criado pela IA ===
-            try {
-              const TECNICO_PHONE_SCHED = "5562999522470";
-              const schedContactName = context.contact?.contact_name || phone;
-              const schedCompanyName = context.contact?.companies?.nome_fantasia || "Não identificada";
-              const schedMsg = `📅 *Novo Agendamento criado pela IA*\n\n` +
-                `🆔 *OS:* #${os.numero_os}\n` +
-                `👤 *Cliente:* ${schedContactName}\n` +
-                `📞 *Telefone:* ${phone}\n` +
-                `🏢 *Empresa:* ${schedCompanyName}\n\n` +
-                `📋 *Título:* ${args.titulo}\n` +
-                `📝 *Descrição:* ${args.descricao}\n\n` +
-                `🗓️ *Data:* ${slot.data}\n` +
-                `⏰ *Horário:* ${slot.hora_inicio} - ${slot.hora_fim}\n` +
-                `🛠️ *Modalidade:* ${slot.modalidade}`;
-
-              await sendWabaText(TECNICO_PHONE_SCHED, schedMsg, { openTicket: false });
-              console.log(`WhatsApp schedule notification sent to ${TECNICO_PHONE_SCHED}`);
-            } catch (schedNotifErr) {
-              console.error("Failed to notify technician about new schedule:", schedNotifErr);
+          // Cliente sem contrato: create_schedule só funciona depois de uma
+          // confirmação explícita de valor+data (confirmar_visita_eventual),
+          // válida por 2h. Sem isso, NÃO agenda — devolve o motivo pro
+          // modelo se autocorrigir em vez de agendar às cegas.
+          if (tipoContrato === "eventual") {
+            const confirmacaoValida = await getVisitaEventualConfirmacaoValida(supabase, conversationId);
+            if (!confirmacaoValida) {
+              result = {
+                success: false,
+                error: "eventual_sem_confirmacao",
+                message: "Antes de agendar para cliente sem contrato: chame consultar_valor_visita, peça a confirmação do cliente sobre valor e data, e só então chame confirmar_visita_eventual. Depois disso, chame create_schedule de novo.",
+              };
+              break;
             }
+          }
+
+          if (!companyId) {
+            result = { success: false, error: "Empresa não identificada — não é possível agendar." };
+            break;
+          }
+
+          // ─── TRAVA (28/07/2026): create_schedule NÃO cria mais OS sozinho
+          // — só propõe um horário candidato (previewSchedule, sem insert).
+          // José pediu depois de um caso real de agendamento com empresa
+          // ambígua. OS real só nasce depois de aprovação manual dele.
+          const tecnico = await pickTechnician(supabase);
+          const preview = await previewSchedule(supabase, {
+            company_id: companyId,
+            titulo: args.titulo,
+            descricao: args.descricao,
+            tipo_servico: args.tipo_servico,
+            data_desejada: args.data,
+            tecnico_preescolhido: tecnico,
+          });
+
+          if (!preview.success) {
+            result = { success: false, error: preview.error };
+            break;
+          }
+
+          const companyNameSched = context.contact?.companies?.nome_fantasia || "empresa não identificada";
+          await supabase.from("agent_proposals").insert({
+            departamento: "operacional",
+            tipo_proposta: "agendamento_visita",
+            titulo: `Agendamento — ${companyNameSched}`,
+            justificativa: args.titulo,
+            conteudo_proposto: args.descricao,
+            destinatario_phone: phone,
+            destinatario_company_id: companyId,
+            dados_estruturados: {
+              tipo_servico: args.tipo_servico,
+              data_desejada: preview.data,
+              hora_inicio: preview.hora_inicio,
+              hora_fim: preview.hora_fim,
+              modalidade: preview.modalidade,
+              tecnico_id: preview.tecnico?.id,
+              tecnico_nome: preview.tecnico?.nome,
+            },
+            created_by_agent: "waba-ai-agent",
+          });
+
+          result = {
+            success: true,
+            aguardando_confirmacao: true,
+            horario_candidato: `${preview.data} ${preview.hora_inicio}-${preview.hora_fim}`,
+            modalidade: preview.modalidade,
+            message: "Pedido de agendamento registrado em /agent-proposals — informe ao cliente que a equipe vai confirmar em breve, NÃO trate como agendamento definitivo.",
+          };
+          console.log(`Schedule proposal registered (aguardando aprovação): ${preview.data} ${preview.hora_inicio} for ${phone}`);
+
+          // === NOTIFICAR JOSÉ pra revisar na tela de Propostas ===
+          try {
+            const TECNICO_PHONE_SCHED = "5562999522470";
+            const schedContactName = context.contact?.contact_name || phone;
+            const schedMsg = `📅 *Pedido de agendamento — AGUARDANDO SUA APROVAÇÃO*\n\n` +
+              `👤 *Cliente:* ${schedContactName}\n` +
+              `📞 *Telefone:* ${phone}\n` +
+              `🏢 *Empresa:* ${companyNameSched}\n\n` +
+              `📋 *Título:* ${args.titulo}\n` +
+              `📝 *Descrição:* ${args.descricao}\n\n` +
+              `🗓️ *Horário candidato:* ${preview.data} ${preview.hora_inicio}-${preview.hora_fim}\n` +
+              `🛠️ *Modalidade:* ${preview.modalidade}\n` +
+              `🔧 *Técnico sugerido:* ${preview.tecnico?.nome}\n\n` +
+              `⚠️ Revise e aprove em /agent-proposals para virar OS de verdade.`;
+
+            await sendWabaText(TECNICO_PHONE_SCHED, schedMsg, { openTicket: false });
+            console.log(`WhatsApp schedule candidate notification sent to ${TECNICO_PHONE_SCHED}`);
+          } catch (schedNotifErr) {
+            console.error("Failed to notify technician about schedule candidate:", schedNotifErr);
           }
         } catch (schedErr: any) {
           result = { success: false, error: schedErr.message };
@@ -2108,6 +2325,184 @@ async function handleToolCalls(supabase: any, toolCalls: any[], phone: string, c
         );
         result = { success: true, message: "Pedido de orçamento registrado e técnico notificado." };
         console.log(`Pedido de orçamento registrado para ${phone}`);
+        break;
+      }
+
+      case "escalate_to_department": {
+        const contactName = context.contact?.contact_name || phone;
+        const companyName = context.contact?.companies?.nome_fantasia || "empresa não identificada";
+        await supabase
+          .from("waba_conversations")
+          .update({ departamento_atual: args.departamento })
+          .eq("id", conversationId);
+        await notifyTechnician(
+          `🏢 *Conversa encaminhada para ${args.departamento.toUpperCase()}*\n\n` +
+          `👤 Cliente: ${contactName}\n` +
+          `📞 ${phone}\n` +
+          `🏢 ${companyName}\n\n` +
+          `📋 Motivo: ${args.motivo}`,
+        );
+        result = { success: true, message: `Conversa encaminhada para o departamento ${args.departamento}.` };
+        console.log(`Conversa ${conversationId} encaminhada para ${args.departamento}`);
+        break;
+      }
+
+      case "propose_new_rule": {
+        const contactName = context.contact?.contact_name || phone;
+        const { data: proposal, error: proposalError } = await supabase
+          .from("agent_proposals")
+          .insert({
+            departamento: args.departamento,
+            tipo_proposta: "nova_regra_negocio",
+            titulo: args.titulo,
+            justificativa: args.justificativa,
+            conteudo_proposto: args.conteudo_proposto,
+            source_refs: { conversation_id: conversationId, phone },
+            created_by_agent: "waba-ai-agent",
+          })
+          .select("id")
+          .single();
+
+        if (proposalError) {
+          console.error("propose_new_rule insert error:", proposalError);
+          result = { error: "Não foi possível registrar a sugestão." };
+        } else {
+          await notifyTechnician(
+            `💡 *Nova sugestão — ${args.departamento.toUpperCase()}*\n\n` +
+            `${args.titulo}\n\n` +
+            `Origem: conversa com ${contactName} (${phone})\n\n` +
+            `Revise na tela de Propostas de Agentes antes que vire regra.`,
+          );
+          result = { success: true, message: "Sugestão registrada. Fica pendente até o José revisar e aprovar — não vira regra sozinha." };
+        }
+        console.log(`Proposta ${proposal?.id} registrada para departamento ${args.departamento}`);
+        break;
+      }
+
+      case "propose_commercial_message": {
+        const contactName = context.contact?.contact_name || phone;
+        const companyName = context.contact?.companies?.nome_fantasia || "empresa não identificada";
+        // Destinatário SEMPRE resolvido do contexto já validado (nunca do texto
+        // livre do cliente) — mesma barreira usada por responder_orcamento/
+        // consultar_contrato pra nunca vazar/mandar pra empresa errada.
+        const { data: proposal, error: proposalError } = await supabase
+          .from("agent_proposals")
+          .insert({
+            departamento: "comercial",
+            tipo_proposta: "mensagem_comercial",
+            titulo: `Sugestão comercial para ${companyName}`,
+            justificativa: args.motivo,
+            conteudo_proposto: args.conteudo_proposto,
+            destinatario_phone: phone,
+            destinatario_company_id: context.companyId || null,
+            source_refs: { conversation_id: conversationId, phone },
+            created_by_agent: "waba-ai-agent",
+          })
+          .select("id")
+          .single();
+
+        if (proposalError) {
+          console.error("propose_commercial_message insert error:", proposalError);
+          result = { error: "Não foi possível registrar a sugestão." };
+        } else {
+          await notifyTechnician(
+            `💡 *Sugestão comercial — ${companyName}*\n\n` +
+            `👤 Cliente: ${contactName} (${phone})\n\n` +
+            `📝 ${args.conteudo_proposto}\n\n` +
+            `Motivo: ${args.motivo}\n\n` +
+            `Revise na tela de Propostas de Agentes antes de enviar — nada foi mandado ao cliente ainda.`,
+          );
+          result = { success: true, message: "Sugestão registrada. Fica pendente até o José revisar e decidir enviar — nada é mandado ao cliente automaticamente." };
+        }
+        console.log(`Proposta comercial ${proposal?.id} registrada para ${phone}`);
+        break;
+      }
+
+      case "consultar_valor_visita": {
+        const { data: item, error: menuError } = await supabase
+          .from("service_menu_items")
+          .select("valor, horas_incluidas, descricao")
+          .eq("nome", "visita_tecnica_padrao")
+          .eq("ativo", true)
+          .maybeSingle();
+
+        if (menuError || !item) {
+          result = { error: "Não foi possível consultar o valor da visita agora." };
+        } else {
+          result = {
+            valor: Number(item.valor),
+            horas_incluidas: Number(item.horas_incluidas),
+            descricao: item.descricao,
+          };
+        }
+        break;
+      }
+
+      case "confirmar_visita_eventual": {
+        const { data: item } = await supabase
+          .from("service_menu_items")
+          .select("valor")
+          .eq("nome", "visita_tecnica_padrao")
+          .eq("ativo", true)
+          .maybeSingle();
+
+        const valorAtual = item ? Number(item.valor) : null;
+        if (valorAtual === null || Math.abs(valorAtual - Number(args.valor)) > 0.01) {
+          result = {
+            success: false,
+            error: "valor_nao_confere",
+            message: `O valor informado (${args.valor}) não bate com o valor atual da visita (${valorAtual ?? "desconhecido"}). Chame consultar_valor_visita de novo e confirme o valor certo com o cliente.`,
+          };
+          break;
+        }
+
+        const { error: updateError } = await supabase
+          .from("waba_conversations")
+          .update({
+            visita_eventual_valor: args.valor,
+            visita_eventual_data: args.data_visita,
+            visita_eventual_confirmada_em: new Date().toISOString(),
+          })
+          .eq("id", conversationId);
+
+        if (updateError) {
+          console.error("confirmar_visita_eventual update error:", updateError);
+          result = { success: false, error: "Não foi possível registrar a confirmação." };
+        } else {
+          result = { success: true, message: `Confirmação registrada: R$${args.valor} para ${args.data_visita}. Agora pode chamar create_schedule.` };
+          console.log(`Visita eventual confirmada para conversa ${conversationId}: R$${args.valor} em ${args.data_visita}`);
+        }
+        break;
+      }
+
+      case "consultar_contrato": {
+        const companyId = context.companyId;
+        if (!companyId) {
+          result = { success: false, error: "empresa_nao_identificada" };
+          break;
+        }
+
+        const { data: contract, error: contractError } = await supabase
+          .from("contracts")
+          .select("tipo, horas_contratadas, horas_consumidas, vigencia_fim, dia_vencimento, valor_mensal")
+          .eq("company_id", companyId)
+          .eq("status", "ativo")
+          .maybeSingle();
+
+        if (contractError || !contract) {
+          result = { success: false, error: "sem_contrato_ativo" };
+        } else {
+          result = {
+            success: true,
+            tipo: contract.tipo,
+            horas_contratadas: Number(contract.horas_contratadas || 0),
+            horas_consumidas: Number(contract.horas_consumidas || 0),
+            horas_restantes: Number(contract.horas_contratadas || 0) - Number(contract.horas_consumidas || 0),
+            vigencia_fim: contract.vigencia_fim,
+            dia_vencimento: contract.dia_vencimento,
+            valor_mensal: contract.valor_mensal !== null ? Number(contract.valor_mensal) : null,
+          };
+        }
         break;
       }
 

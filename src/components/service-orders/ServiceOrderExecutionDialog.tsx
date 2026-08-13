@@ -128,6 +128,43 @@ export function ServiceOrderExecutionDialog({
         if (res.error) console.error("Erro ao notificar cliente:", res.error);
       }).catch(err => console.error("Erro ao chamar notify-os-status:", err));
 
+      // Cliente com contrato: registra o consumo de horas. O trigger
+      // update_contract_hours_trigger soma horas_consumidas sozinho — não
+      // fazemos esse cálculo aqui. Não-fatal: nunca trava a finalização da OS.
+      if (finalizar && serviceOrder.company_id) {
+        try {
+          const { data: company } = await supabase
+            .from("companies")
+            .select("tipo_contrato")
+            .eq("id", serviceOrder.company_id)
+            .maybeSingle();
+
+          if (company?.tipo_contrato === "contrato_manutencao") {
+            const { data: contract } = await supabase
+              .from("contracts")
+              .select("id")
+              .eq("company_id", serviceOrder.company_id)
+              .eq("status", "ativo")
+              .maybeSingle();
+
+            if (contract) {
+              const { error: hourEntryError } = await supabase.from("contract_hour_entries").insert({
+                contract_id: contract.id,
+                service_order_id: serviceOrder.id,
+                ticket_id: serviceOrder.ticket_id || null,
+                tecnico_id: serviceOrder.tecnico_id || user.id,
+                horas: data.tempo_gasto_horas ?? 0,
+                descricao: `OS #${serviceOrder.numero_os}`,
+                data_registro: data.data_execucao,
+              });
+              if (hourEntryError) console.error("Erro ao registrar consumo de horas do contrato:", hourEntryError);
+            }
+          }
+        } catch (contractErr) {
+          console.error("Erro ao lançar horas de contrato:", contractErr);
+        }
+      }
+
       toast({
         title: finalizar ? "OS finalizada!" : "Execução salva!",
         description: `OS #${serviceOrder.numero_os} ${finalizar ? "finalizada" : "marcada como executada"}.`,

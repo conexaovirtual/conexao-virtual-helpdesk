@@ -66,6 +66,17 @@ export default function Dashboard() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const { profile, loading: authLoading } = useAuth();
+
+  // Técnico de campo (sem admin_provedor) não tem visão geral da empresa —
+  // José pediu (05/08/2026) que ele veja só o que é dele. O Dashboard geral
+  // mostra estatística company-wide, então manda ele direto pro Meu Dia,
+  // que já é escopado ao próprio técnico.
+  useEffect(() => {
+    if (!authLoading && profile) {
+      const isFieldTechOnly = profile.roles?.includes("tecnico") && !profile.roles?.includes("admin_provedor");
+      if (isFieldTechOnly) navigate("/meu-dia", { replace: true });
+    }
+  }, [authLoading, profile, navigate]);
   const [isCreateOSDialogOpen, setIsCreateOSDialogOpen] = useState(false);
   const [selectedServiceOrder, setSelectedServiceOrder] = useState<any>(null);
   const [isDetailDialogOpen, setIsDetailDialogOpen] = useState(false);

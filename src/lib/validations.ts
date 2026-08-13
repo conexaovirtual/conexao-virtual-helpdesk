@@ -176,6 +176,17 @@ export const companySchema = z.object({
     .default('eventual'),
 });
 
+// Login NUNCA deve reavaliar força de senha — isso é coisa de CADASTRO
+// (senha nova). No login o usuário está autenticando uma senha que já
+// EXISTE; se ela não bater com regra de força atual (ex.: conta antiga,
+// senha simples definida na criação), o formulário travava sem nem chegar
+// a consultar o Supabase — usuário correto ficava PERMANENTEMENTE sem
+// conseguir entrar. Achado real: 05/08/2026, onboarding do técnico Mike.
+export const loginSchema = z.object({
+  email: z.string().trim().email('E-mail inválido').min(1, 'E-mail é obrigatório'),
+  password: z.string().min(1, 'Senha é obrigatória'),
+});
+
 export const authSchema = z.object({
   email: z.string().trim().email('E-mail inválido').min(1, 'E-mail é obrigatório'),
   password: z.string()
@@ -203,3 +214,4 @@ export type AssetFormData = z.infer<typeof assetSchema>;
 export type CommentFormData = z.infer<typeof commentSchema>;
 export type CompanyFormData = z.infer<typeof companySchema>;
 export type AuthFormData = z.infer<typeof authSchema>;
+export type LoginFormData = z.infer<typeof loginSchema>;

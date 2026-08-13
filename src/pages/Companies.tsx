@@ -14,7 +14,10 @@ export default function Companies() {
   const [editingCompany, setEditingCompany] = useState<any>(null);
   const [refreshTrigger, setRefreshTrigger] = useState(0);
 
-  const canAccess = profile?.roles?.includes('admin_provedor') || profile?.roles?.includes('tecnico');
+  // Técnico de campo não edita mais dado de empresa (José pediu 05/08/2026,
+  // ao contratar o Mike) — RLS já bloqueia insert/update pra 'tecnico', e a
+  // tela inteira agora é admin-only pra não oferecer botão que vai falhar.
+  const canAccess = profile?.roles?.includes('admin_provedor');
   const canCreate = canAccess;
   const canEdit = canAccess;
   const canDelete = profile?.roles?.includes('admin_provedor');
