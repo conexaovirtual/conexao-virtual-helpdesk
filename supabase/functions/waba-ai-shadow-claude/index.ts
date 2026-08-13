@@ -64,7 +64,7 @@ serve(async (req: Request) => {
     const openaiChatHistory: any[] = Array.isArray(body.chat_history) ? body.chat_history : [];
     customerMessage = extractLastUserText(openaiChatHistory);
 
-    const claudeMessages = toClaudeMessages(openaiChatHistory);
+    const claudeMessages = toClaudeMessages(openaiChatHistory, customerMessage);
     const tools = getClaudeTools();
 
     let messages = claudeMessages;
@@ -184,7 +184,7 @@ function extractLastUserText(openaiHistory: any[]): string | null {
 // Converte o histórico no formato OpenAI (o mesmo que a Miya monta) pro
 // formato de mensagens da Claude. Imagem (visão) é omitida aqui — este
 // teste compara só o texto; comparação com imagem fica pra uma fase 2.
-function toClaudeMessages(openaiHistory: any[]): { role: string; content: string }[] {
+function toClaudeMessages(openaiHistory: any[], fallbackUserText: string | null): { role: string; content: string }[] {
   const converted = openaiHistory.map((m) => {
     let text: string;
     if (typeof m.content === "string") {
@@ -210,6 +210,17 @@ function toClaudeMessages(openaiHistory: any[]): { role: string; content: string
   }
   // Tem que começar com "user"
   while (merged.length && merged[0].role !== "user") merged.shift();
+
+  // E tem que TERMINAR com "user" (a API rejeita terminar em "assistant" —
+  // "prefill" não é suportado nesse modelo). Acontecia quando a mensagem que
+  // disparou a IA (ex.: áudio recém-transcrito) ainda não tinha sido
+  // persistida no banco no momento da leitura do histórico — o fallback
+  // garante a mensagem real do cliente no final mesmo nesse caso.
+  if (merged.length === 0 || merged[merged.length - 1].role !== "user") {
+    if (fallbackUserText && fallbackUserText.trim()) {
+      merged.push({ role: "user", content: fallbackUserText });
+    }
+  }
   return merged;
 }
 

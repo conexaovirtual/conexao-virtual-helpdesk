@@ -49,6 +49,7 @@ const CsatDashboard = lazyWithRetry(() => import("./pages/CsatDashboard"));
 const Produtos = lazyWithRetry(() => import("./pages/Produtos"));
 const Servicos = lazyWithRetry(() => import("./pages/Servicos"));
 const Propostas = lazyWithRetry(() => import("./pages/Propostas"));
+const AgentProposals = lazyWithRetry(() => import("./pages/AgentProposals"));
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -113,6 +114,7 @@ const App = () => (
               <Route path="/produtos" element={<Produtos />} />
               <Route path="/servicos" element={<Servicos />} />
               <Route path="/propostas" element={<Propostas />} />
+              <Route path="/agent-proposals" element={<AgentProposals />} />
               <Route path="/knowledge-base" element={<KnowledgeBase />} />
               <Route path="/waba-chat" element={<WABAChat />} />
               <Route path="/ai-support" element={<AISupportChat />} />

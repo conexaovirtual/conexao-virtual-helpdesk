@@ -455,6 +455,11 @@ async function saveInboundMessage(supabase: any, data: InboundMessageData) {
   if (!isGroup || isNewConversation) {
     upsertData.contact_name = resolvedContactName;
   }
+  // Grupo novo: nasce com IA desligada (o badge "IA Ativa" no painel ficaria
+  // enganoso senão — a IA nunca responde em grupo, ver shouldTriggerAI acima).
+  if (isGroup && isNewConversation) {
+    upsertData.ai_enabled = false;
+  }
   if (profilePhotoUrl) {
     upsertData.profile_photo_url = profilePhotoUrl;
   }
@@ -480,7 +485,10 @@ async function saveInboundMessage(supabase: any, data: InboundMessageData) {
   }
 
   // ─── Auto-reactivate AI if disabled and last interaction was 30+ minutes ago ───
-  if (!previousAiEnabled) {
+  // Nunca reativa em grupo — a IA não deve atender grupo nunca, então essa
+  // reativação automática (pensada pra conversa individual onde um técnico
+  // assumiu manualmente) não se aplica aqui.
+  if (!previousAiEnabled && !isGroup) {
     const lastMsgTime = new Date(previousLastMsgAt || 0).getTime();
     const now = Date.now();
     const minutesSinceLastMsg = (now - lastMsgTime) / (1000 * 60);
@@ -570,14 +578,18 @@ async function saveInboundMessage(supabase: any, data: InboundMessageData) {
 
   // Global AI kill-switch: set WABA_AI_DISABLED=true in secrets to fully disable AI replies
   const aiGloballyDisabled = (Deno.env.get("WABA_AI_DISABLED") || "").toLowerCase() === "true";
-  // Trigger AI Agent for text, audio and image messages
-  const shouldTriggerAI = !aiGloballyDisabled && (
+  // Trigger AI Agent for text, audio and image messages — NUNCA em grupo
+  // (José pediu 27/07/2026: atendimento em grupo estava ficando confuso).
+  const shouldTriggerAI = !aiGloballyDisabled && !isGroup && (
     (messageType === "text" && content && content !== "[Mensagem sem texto]") ||
     messageType === "audio" ||
     (messageType === "image" && mediaUrl)
   );
   if (aiGloballyDisabled) {
     console.log("AI globally disabled via WABA_AI_DISABLED — skipping AI agent invocation");
+  }
+  if (isGroup) {
+    console.log("Group message, AI disabled for groups — skipping AI agent invocation:", phoneNumber);
   }
   if (shouldTriggerAI) {
     // ─── Debounce anti-fragmentação ─────────────────────────────────────
@@ -768,16 +780,27 @@ async function captureCsatRating(supabase: any, conversationId: string, phoneNum
   try {
     const digits = (phoneNumber || "").replace(/\D/g, "");
     if (!digits) return false;
-    const candidates = Array.from(new Set([digits, digits.startsWith("55") ? digits : "55" + digits]));
+    // Variantes BR do número: com e sem o 9º dígito (o telefone cadastrado da
+    // empresa e o número real do JID do WhatsApp costumam divergir nisso —
+    // mesmo padrão já usado em waba-ai-agent/index.ts pra vincular empresa).
+    // Sem isso, csat_responses.phone (gravado a partir do telefone cadastrado)
+    // pode nunca bater com o telefone que manda a resposta de verdade.
+    const candidates = new Set([digits, digits.startsWith("55") ? digits : "55" + digits]);
+    const withNormalized = digits.startsWith("55") ? digits : "55" + digits;
+    if (withNormalized.length === 12) {
+      candidates.add(withNormalized.slice(0, 4) + "9" + withNormalized.slice(4));
+    } else if (withNormalized.length === 13 && withNormalized[4] === "9") {
+      candidates.add(withNormalized.slice(0, 4) + withNormalized.slice(5));
+    }
     const since = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
 
     const { data: pending } = await supabase
       .from("csat_responses")
-      .select("id")
+      .select("id, company_id, ticket_id, service_order_id, companies:company_id(nome_fantasia)")
       .is("rating", null)
       .eq("status", "enviado")
       .gte("created_at", since)
-      .in("phone", candidates)
+      .in("phone", [...candidates])
       .order("created_at", { ascending: false })
       .limit(1);
 
@@ -802,6 +825,29 @@ async function captureCsatRating(supabase: any, conversationId: string, phoneNum
       sender_type: "agent",
       status: "sent",
     });
+
+    // Nota baixa (1-2): sinal de insatisfação claro, escala pro departamento
+    // Qualidade — regra de limiar determinística, não passa pela IA. Nota 3
+    // fica só com o agradecimento acima (critério conservador, não gera ruído).
+    if (rating <= 2) {
+      await supabase
+        .from("waba_conversations")
+        .update({ departamento_atual: "qualidade" })
+        .eq("id", conversationId);
+
+      const empresa = pending[0].companies?.nome_fantasia || "empresa não identificada";
+      const ref = pending[0].ticket_id
+        ? `Chamado vinculado (id ${pending[0].ticket_id})`
+        : pending[0].service_order_id
+        ? `OS vinculada (id ${pending[0].service_order_id})`
+        : "Sem referência de chamado/OS";
+      const alertMsg = `⚠️ *Nota CSAT baixa recebida*\n\n` +
+        `👤 Telefone: ${phoneNumber}\n` +
+        `🏢 Empresa: ${empresa}\n` +
+        `⭐ Nota: ${rating}/5\n` +
+        `📋 ${ref}`;
+      await sendWabaText("5562999522470", alertMsg, { openTicket: false });
+    }
 
     return true;
   } catch (err) {
